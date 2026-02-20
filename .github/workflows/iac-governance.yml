@@ -1,0 +1,195 @@
+name: iac-governance
+
+on:
+  push:
+    branches: [ "main", "master" ]
+    paths:
+      - "DEVSECOPS-azure-sql/**" 
+      - ".github/workflows/iac-governance.yml"
+
+  pull_request:
+    branches: [ "main", "master" ]
+    paths:
+      - "DEVSECOPS-azure-sql/**" 
+      - ".github/workflows/iac-governance.yml"
+
+  workflow_dispatch:
+    inputs:
+      location:
+        description: "Azure location (example: eastus, westus2)"
+        required: true
+        default: "eastus"
+      vm_size:
+        description: "VM size (example: Standard_B2s)"
+        required: true
+        default: "Standard_B2s"
+      break_tags:
+        description: "Set to true to intentionally fail governance by removing costCenter tag"
+        required: false
+        default: "false"
+
+jobs:
+  terraform-plan-gate:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      pull-requests: write
+      security-events: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.6.6
+
+      - name: Terraform Init
+        working-directory: DEVSECOPS-azure-sql/
+
+        env:
+          ARM_CLIENT_ID: ${{ fromJson(secrets.ARM_CREDENTIALS).clientId }}
+          ARM_CLIENT_SECRET: ${{ fromJson(secrets.ARM_CREDENTIALS).clientSecret }}
+          ARM_SUBSCRIPTION_ID: ${{ fromJson(secrets.ARM_CREDENTIALS).subscriptionId }}
+          ARM_TENANT_ID: ${{ fromJson(secrets.ARM_CREDENTIALS).tenantId }}
+        run: terraform init -upgrade
+
+      - name: Terraform Validate
+        working-directory: DEVSECOPS-azure-sql/
+        run: terraform validate
+
+      # =========================
+      # ✅ Nivel 2: IaC Security Scan (Checkov)
+      # =========================
+      - name: Install Checkov
+        run: pip3 install checkov
+
+      # 1) CLI output (para comentario en PR) - no bloquea
+      - name: Checkov scan (CLI output)
+        working-directory: DEVSECOPS-azure-sql
+        run: |
+          set +e
+          checkov -d . --framework terraform > ../checkov.txt
+          exit 0
+
+      # 2) SARIF válido (archivo)
+      - name: Checkov scan (SARIF)
+        working-directory: DEVSECOPS-azure-sql
+        run: |
+          set +e
+          checkov -d . --framework terraform --output sarif --output-file-path checkov.sarif
+          exit 0
+
+      # 3) Upload SARIF (si falla, NO corta el pipeline)
+      - name: Upload Checkov SARIF
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: azuredemo/terraform/checkov.sarif
+
+      # 4) Comentario en el PR (si es PR) con salida legible
+      - name: Comment Checkov results on PR
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            let body = fs.readFileSync('azuredemo/checkov.txt', 'utf8');
+            if (body.length > 60000) body = body.slice(0, 60000) + "\n...(truncated)";
+            const comment = [
+              "## 🔐 Checkov – IaC Security Scan",
+              "```",
+              body,
+              "```"
+            ].join("\n");
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body: comment
+            });
+
+      # =========================
+      # ✅ Nivel 1: Plan + Governance Gate
+      # =========================
+      - name: Terraform Plan
+        working-directory: DEVSECOPS-azure-sql
+        env:
+          ARM_CLIENT_ID: ${{ fromJson(secrets.ARM_CREDENTIALS).clientId }}
+          ARM_CLIENT_SECRET: ${{ fromJson(secrets.ARM_CREDENTIALS).clientSecret }}
+          ARM_SUBSCRIPTION_ID: ${{ fromJson(secrets.ARM_CREDENTIALS).subscriptionId }}
+          ARM_TENANT_ID: ${{ fromJson(secrets.ARM_CREDENTIALS).tenantId }}
+
+          TF_VAR_location: ${{ github.event.inputs.location || 'eastus' }}
+          TF_VAR_vm_size: ${{ github.event.inputs.vm_size || 'Standard_B2s' }}
+          TF_VAR_tags: '{"owner":"fabian","costCenter":"demo","environment":"dev","application":"iac-governance"}'
+        run: |
+          # Demo fail: quitar costCenter
+          if [ "${{ github.event.inputs.break_tags || 'false' }}" = "true" ]; then
+            echo 'TF_VAR_tags={"owner":"fabian","environment":"dev","application":"iac-governance"}' >> $GITHUB_ENV
+          fi
+
+          terraform plan -out=tfplan
+
+      - name: Export plan to JSON
+        working-directory: DEVSECOPS-azure-sql
+        run: terraform show -json tfplan > tfplan.json
+
+      # =========================
+      # 🟢 OPCIÓN 1: Cost Estimation Gate (Infracost)
+      # =========================
+      - name: Install Infracost
+        uses: infracost/actions/setup@v3
+        with:
+          api-key: ${{ secrets.INFRACOST_API_KEY }}
+
+      - name: Run Infracost breakdown (from plan)
+        working-directory: DEVSECOPS-azure-sql
+        run: |
+          infracost breakdown \
+            --path=tfplan.json \
+            --format=json \
+            --out-file=infracost.json
+
+      - name: Show cost summary
+        working-directory: DEVSECOPS-azure-sql
+        run: |
+          infracost output \
+            --path=infracost.json \
+            --format=table
+
+      - name: Enforce cost policy
+        working-directory: DEVSECOPS-azure-sql
+        env:
+          MAX_MONTHLY_USD: "50"
+        run: |
+          python - <<'PY'
+          import json, os, sys
+          max_cost = float(os.environ.get("MAX_MONTHLY_USD","50"))
+          with open("infracost.json") as f:
+            data = json.load(f)
+
+          cost = data.get("totalMonthlyCost")
+          if cost is None:
+            print("⚠️ Could not read totalMonthlyCost from infracost.json; skipping policy.")
+            sys.exit(0)
+
+          cost = float(cost)
+          print(f"Monthly cost estimate: ${cost:.2f} (max allowed ${max_cost:.2f})")
+
+          if cost > max_cost:
+            print(f"❌ Cost exceeds allowed threshold ({max_cost} USD)")
+            sys.exit(1)
+
+          print("✅ Cost policy passed")
+          PY
+
+      # =========================
+      # ✅ Análisis de gobierno (tu script)
+      # =========================
+      - name: Analyze Terraform Plan (IaC Governance)
+        run: python azuredemo/scripts/analyze_plan.py azuredemo/terraform/tfplan.json
+
