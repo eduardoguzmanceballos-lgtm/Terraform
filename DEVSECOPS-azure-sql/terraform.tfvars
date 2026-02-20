@@ -1,5 +1,5 @@
 location = "eastus"
 project  = "devsecops"
 env      = "dev"
-owner    = "camilo"
+owner    = "Eduardo"
 sql_admin_user = "sqladminuser"
