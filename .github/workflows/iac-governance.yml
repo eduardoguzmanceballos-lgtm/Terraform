@@ -135,7 +135,7 @@ jobs:
           TF_VAR_tags: '{"owner":"fabian","costCenter":"demo","environment":"dev","application":"iac-governance"}'
         run: |
           # Demo fail: quitar costCenter
-          if if [ "${BREAK_TAGS}" = "true" ]; then
+          if [ "${BREAK_TAGS}" = "true" ]; then
             echo 'TF_VAR_tags={"owner":"fabian","environment":"dev","application":"iac-governance"}' >> $GITHUB_ENV
           fi
           if [ "${RUN_PLAN}" != "true" ]; then
