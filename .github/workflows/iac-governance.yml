@@ -53,6 +53,7 @@ jobs:
         run: |
           echo "RUN_PLAN=${{ github.event.inputs.run_plan || vars.RUN_TERRAFORM_PLAN || 'false' }}" >> $GITHUB_ENV
           echo "BREAK_TAGS=${{ github.event.inputs.break_tags || vars.BREAK_TAGS || 'false' }}" >> $GITHUB_ENV
+          echo "HAS_INFRACOST_KEY=${{ secrets.INFRACOST_API_KEY != '' }}" >> $GITHUB_ENV
       - name: Terraform Init
         working-directory: DEVSECOPS-azure-sql/
 
@@ -154,13 +155,13 @@ jobs:
       # 🟢 OPCIÓN 1: Cost Estimation Gate (Infracost)
       # =========================
       - name: Install Infracost
-        if: ${{ env.RUN_PLAN == 'true' && secrets.INFRACOST_API_KEY }}
+        if: ${{ env.RUN_PLAN == 'true' && env.HAS_INFRACOST_KEY == 'true' }}
         uses: infracost/actions/setup@v3
         with:
           api-key: ${{ secrets.INFRACOST_API_KEY }}
 
       - name: Run Infracost breakdown (from plan)
-        if: ${{ env.RUN_PLAN == 'true' && secrets.INFRACOST_API_KEY != '' }}
+        if: ${{ env.RUN_PLAN == 'true' && env.HAS_INFRACOST_KEY == 'true' }}
         working-directory: DEVSECOPS-azure-sql
         run: |
           infracost breakdown \
