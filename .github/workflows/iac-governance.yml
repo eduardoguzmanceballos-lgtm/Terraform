@@ -146,6 +146,7 @@ jobs:
           terraform plan -out=tfplan
 
       - name: Export plan to JSON
+        if: ${{ env.RUN_PLAN == 'true' }}
         working-directory: DEVSECOPS-azure-sql
         run: terraform show -json tfplan > tfplan.json
 
@@ -153,11 +154,13 @@ jobs:
       # 🟢 OPCIÓN 1: Cost Estimation Gate (Infracost)
       # =========================
       - name: Install Infracost
+        if: ${{ env.RUN_PLAN == 'true' && secrets.INFRACOST_API_KEY }}
         uses: infracost/actions/setup@v3
         with:
           api-key: ${{ secrets.INFRACOST_API_KEY }}
 
       - name: Run Infracost breakdown (from plan)
+        if: ${{ env.RUN_PLAN == 'true' && secrets.INFRACOST_API_KEY != '' }}
         working-directory: DEVSECOPS-azure-sql
         run: |
           infracost breakdown \
