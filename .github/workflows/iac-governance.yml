@@ -27,6 +27,10 @@ on:
         description: "Set to true to intentionally fail governance by removing costCenter tag"
         required: false
         default: "false"
+      run_plan:
+        description: "Set to true to run terraform plan (requires Azure creds)"
+        required: false
+        default: "false"
 
 jobs:
   terraform-plan-gate:
@@ -45,7 +49,10 @@ jobs:
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: 1.6.6
-
+      - name: Resolve governance flags (dispatch OR vars)
+        run: |
+          echo "RUN_PLAN=${{ github.event.inputs.run_plan || vars.RUN_TERRAFORM_PLAN || 'false' }}" >> $GITHUB_ENV
+          echo "BREAK_TAGS=${{ github.event.inputs.break_tags || vars.BREAK_TAGS || 'false' }}" >> $GITHUB_ENV
       - name: Terraform Init
         working-directory: DEVSECOPS-azure-sql/
 
@@ -128,8 +135,12 @@ jobs:
           TF_VAR_tags: '{"owner":"fabian","costCenter":"demo","environment":"dev","application":"iac-governance"}'
         run: |
           # Demo fail: quitar costCenter
-          if [ "${{ github.event.inputs.break_tags || 'false' }}" = "true" ]; then
+          if if [ "${BREAK_TAGS}" = "true" ]; then
             echo 'TF_VAR_tags={"owner":"fabian","environment":"dev","application":"iac-governance"}' >> $GITHUB_ENV
+          fi
+          if [ "${RUN_PLAN}" != "true" ]; then
+            echo "RUN_PLAN=false → skipping terraform plan"
+            exit 0
           fi
 
           terraform plan -out=tfplan
