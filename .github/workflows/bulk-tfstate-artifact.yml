@@ -1,0 +1,86 @@
+name: tfc-bulk-tfstate-artifact
+
+on:
+  workflow_dispatch:
+    inputs:
+      org:
+        description: "Terraform Cloud Organization"
+        required: true
+        default: ""
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download TFstate (bulk)
+        shell: pwsh
+        env:
+          TFC_TOKEN: ${{ secrets.TFC_TOKEN }}
+          ORG: ${{ github.event.inputs.org }}
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $root = Join-Path $env:GITHUB_WORKSPACE "out"
+          $orgDir = Join-Path $root $env:ORG
+          New-Item -ItemType Directory -Force -Path $orgDir | Out-Null
+
+          # List workspaces (page[size] needs URL encoding in many shells)
+          $url = "https://app.terraform.io/api/v2/organizations/{0}/workspaces?page%5Bsize%5D=100" -f $env:ORG
+
+          $resp = curl -sS `
+            -H "Authorization: Bearer $env:TFC_TOKEN" `
+            -H "Content-Type: application/vnd.api+json" `
+            $url
+
+          $workspaces = ($resp | ConvertFrom-Json).data.attributes.name
+          if (-not $workspaces) { throw "No workspaces found or no access for org '$env:ORG'." }
+
+          $manifest = @()
+
+          foreach ($ws in $workspaces) {
+            Write-Host "==> Workspace: $ws"
+
+            $wsJson = curl -sS `
+              -H "Authorization: Bearer $env:TFC_TOKEN" `
+              -H "Content-Type: application/vnd.api+json" `
+              ("https://app.terraform.io/api/v2/organizations/{0}/workspaces/{1}" -f $env:ORG, $ws)
+
+            $stateVerId = ($wsJson | ConvertFrom-Json).data.relationships.'current-state-version'.data.id
+            if (-not $stateVerId) {
+              $manifest += [pscustomobject]@{workspace=$ws; status="skipped"; reason="no current state"; path=$null}
+              continue
+            }
+
+            $svJson = curl -sS `
+              -H "Authorization: Bearer $env:TFC_TOKEN" `
+              -H "Content-Type: application/vnd.api+json" `
+              ("https://app.terraform.io/api/v2/state-versions/{0}" -f $stateVerId)
+
+            $dlUrl = ($svJson | ConvertFrom-Json).data.attributes.'hosted-state-download-url'
+            if (-not $dlUrl) {
+              $manifest += [pscustomobject]@{workspace=$ws; status="skipped"; reason="no download url (permissions?)"; path=$null}
+              continue
+            }
+
+            $wsDir = Join-Path $orgDir $ws
+            New-Item -ItemType Directory -Force -Path $wsDir | Out-Null
+
+            $outFile = Join-Path $wsDir "terraform.tfstate"
+            curl -sS $dlUrl -o $outFile
+
+            $manifest += [pscustomobject]@{workspace=$ws; status="downloaded"; reason=$null; path=("out/{0}/{1}/terraform.tfstate" -f $env:ORG, $ws)}
+            Write-Host "   saved -> $outFile"
+          }
+
+          $manifestPath = Join-Path $orgDir "manifest.json"
+          $manifest | ConvertTo-Json -Depth 5 | Out-File -Encoding utf8 $manifestPath
+          Write-Host "Manifest -> $manifestPath"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfstate-backup-${{ github.event.inputs.org }}
+          path: out/${{ github.event.inputs.org }}
+
+      - name: Cleanup
+        run: rm -rf out
