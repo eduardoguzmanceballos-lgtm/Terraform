@@ -6,7 +6,7 @@ on:
       org:
         description: "Terraform Cloud Organization"
         required: true
-        default: ""
+        
 
 jobs:
   backup:
