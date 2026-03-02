@@ -1,0 +1,229 @@
+name: quality-gate
+
+on:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      run_cost:
+        description: "Run cost estimation (Infracost)"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  terraform-quality:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # -------------------------
+      # Dependency scanning (PR)
+      # -------------------------
+      - name: Dependency review (PR)
+        if: ${{ github.event_name == 'pull_request' }}
+        uses: actions/dependency-review-action@v4
+
+      # -------------------------
+      # Secret scanning
+      # -------------------------
+      - name: Secret scanning (Gitleaks)
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # -------------------------
+      # Setup Terraform
+      # -------------------------
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.6.6
+
+      - name: Terraform fmt (check)
+        run: terraform fmt -check -recursive
+
+      - name: Terraform init (example)
+        working-directory: examples/storage-basic
+        run: terraform init -input=false -upgrade
+
+      - name: Terraform validate (example)
+        working-directory: examples/storage-basic
+        run: terraform validate
+
+      # -------------------------
+      # Resolve flags (gating)
+      # - Avoid using secrets.* directly in if:
+      # -------------------------
+      - name: Resolve flags
+        shell: bash
+        run: |
+          # RUN_COST (only for workflow_dispatch runs; for PR it's default false)
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.run_cost }}" ]; then
+            echo "RUN_COST=${{ github.event.inputs.run_cost }}" >> $GITHUB_ENV
+          else
+            echo "RUN_COST=false" >> $GITHUB_ENV
+          fi
+
+          # HAS_INFRACOST_KEY (evaluate secret here, not in if:)
+          if [ -n "${{ secrets.INFRACOST_API_KEY }}" ]; then
+            echo "HAS_INFRACOST_KEY=true" >> $GITHUB_ENV
+          else
+            echo "HAS_INFRACOST_KEY=false" >> $GITHUB_ENV
+          fi
+
+      # -------------------------
+      # Security scanning (Checkov)
+      # -------------------------
+      - name: Install Checkov
+        run: pip3 install -q checkov
+
+      - name: Run Checkov (produce JSON)
+        run: |
+          checkov -d . \
+            --framework terraform \
+            --check CKV_AZURE_59,CKV_AZURE_33,CKV_AZURE_40 \
+            -o json > checkov-results.json || true
+
+      - name: Build Security Summary (table)
+        run: |
+          python3 - <<'PY'
+          import json
+
+          path = "checkov-results.json"
+          with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+          results = data.get("results", {})
+          failed = results.get("failed_checks", []) or []
+          passed = results.get("passed_checks", []) or []
+          total = len(failed) + len(passed)
+
+          lines = []
+          lines.append("## 🔐 Security Gate Summary (Checkov)")
+          lines.append("")
+          lines.append(f"- Total checks: **{total}**")
+          lines.append(f"- Passed: **{len(passed)}**")
+          lines.append(f"- Failed: **{len(failed)}**")
+          lines.append("")
+
+          if failed:
+            lines.append("### ❌ Failed checks (top 10)")
+            lines.append("| Check ID | Resource | File | Line | Message |")
+            lines.append("|---|---|---:|---:|---|")
+            for f in failed[:10]:
+              check_id = f.get("check_id","")
+              res = f.get("resource","")
+              file_path = f.get("file_path","")
+              line = f.get("file_line_range",[None,None])
+              line0 = line[0] if isinstance(line, list) and line else ""
+              msg = (f.get("check_name","") or "").replace("\n"," ").strip()
+              lines.append(f"| `{check_id}` | `{res}` | `{file_path}` | `{line0}` | {msg} |")
+          else:
+            lines.append("✅ No failed checks found.")
+
+          print("\n".join(lines))
+          PY
+
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+
+          path = "checkov-results.json"
+          with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+          results = data.get("results", {})
+          failed = results.get("failed_checks", []) or []
+          passed = results.get("passed_checks", []) or []
+          total = len(failed) + len(passed)
+
+          print("## 🔐 Security Gate Summary (Checkov)")
+          print("")
+          print(f"- Total checks: **{total}**")
+          print(f"- Passed: **{len(passed)}**")
+          print(f"- Failed: **{len(failed)}**")
+          print("")
+          if failed:
+            print("### ❌ Failed checks (top 10)")
+            print("| Check ID | Resource | File | Line | Message |")
+            print("|---|---|---:|---:|---|")
+            for f in failed[:10]:
+              check_id = f.get("check_id","")
+              res = f.get("resource","")
+              file_path = f.get("file_path","")
+              line = f.get("file_line_range",[None,None])
+              line0 = line[0] if isinstance(line, list) and line else ""
+              msg = (f.get("check_name","") or "").replace("\n"," ").strip()
+              print(f"| `{check_id}` | `{res}` | `{file_path}` | `{line0}` | {msg} |")
+          else:
+            print("✅ No failed checks found.")
+          PY
+
+      - name: Verify results file exists
+        run: |
+          ls -la
+          test -f checkov-results.json && echo "✅ JSON generado"
+
+      - name: Upload Checkov JSON
+        uses: actions/upload-artifact@v4
+        with:
+          name: checkov-results
+          path: checkov-results.json
+
+      
+
+      # -------------------------
+      # Cost estimation (Infracost) - demo friendly
+      # -------------------------
+      - name: Cost estimation skipped (info)
+        if: ${{ env.RUN_COST != 'true' || env.HAS_INFRACOST_KEY != 'true' }}
+        run: |
+          echo "## 💸 Cost Estimation (Infracost)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- RUN_COST: **${RUN_COST}**" >> $GITHUB_STEP_SUMMARY
+          echo "- HAS_INFRACOST_KEY: **${HAS_INFRACOST_KEY}**" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "ℹ️ Skipping cost estimation (gated by input + secret)." >> $GITHUB_STEP_SUMMARY
+
+      - name: Setup Infracost
+        if: ${{ env.RUN_COST == 'true' && env.HAS_INFRACOST_KEY == 'true' }}
+        uses: infracost/actions/setup@v3
+        with:
+          api-key: ${{ secrets.INFRACOST_API_KEY }}
+
+      # Demo mode: we show it runs and produces output.
+      # Later you can wire it to tfplan.json once you enable real terraform plan.
+      - name: Infracost (demo mode)
+        if: ${{ env.RUN_COST == 'true' && env.HAS_INFRACOST_KEY == 'true' }}
+        run: |
+          echo "## 💸 Cost Estimation (Infracost)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "✅ Infracost installed and ready." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Next step (when RUN_PLAN exists): infracost breakdown --path tfplan.json" >> $GITHUB_STEP_SUMMARY
+          infracost --version
+
+      - name: Enforce Security Policy (fail on findings)
+        run: |
+          python3 - <<'PY'
+          import json, sys
+
+          with open("checkov-results.json","r",encoding="utf-8") as f:
+              data = json.load(f)
+
+          failed = data.get("results", {}).get("failed_checks", []) or []
+
+          if len(failed) > 0:
+              print(f"❌ Security Gate failed: {len(failed)} findings detected.")
+              sys.exit(1)
+
+          print("✅ Security Gate passed.")
+          PY
