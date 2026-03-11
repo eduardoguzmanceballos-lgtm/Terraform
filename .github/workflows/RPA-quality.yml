@@ -697,13 +697,14 @@ jobs:
       - name: Enviar reporte completo al lider
         env:
           MAIL_USERNAME:  ${{ secrets.MAIL_USERNAME }}
-          MAIL_PASSWORD:  ${{ secrets.MAIL_PASSWORD }}
-          MAIL_TO:        ${{ secrets.MAIL_TO }}
-          BOT_NOMBRE:     ${{ needs.exportar_bot.outputs.bot_nombre }}
-          TOTAL_CRITICAL: ${{ needs.exportar_bot.outputs.total_critical }}
-          TOTAL_HIGH:     ${{ needs.exportar_bot.outputs.total_high }}
-          RUN_ID:         ${{ github.run_id }}
-          REPO:           ${{ github.repository }}
+          MAIL_PASSWORD:         ${{ secrets.MAIL_PASSWORD }}
+          MAIL_TO:               ${{ secrets.MAIL_TO }}
+          BOT_NOMBRE:            ${{ needs.exportar_bot.outputs.bot_nombre }}
+          TOTAL_CRITICAL:        ${{ needs.exportar_bot.outputs.total_critical }}
+          TOTAL_HIGH:            ${{ needs.exportar_bot.outputs.total_high }}
+          CREDENTIAL_VIOLATIONS: ${{ needs.exportar_bot.outputs.credential_violations }}
+          RUN_ID:                ${{ github.run_id }}
+          REPO:                  ${{ github.repository }}
         run: |
           python3 - << 'PYEOF'
           import smtplib, os
@@ -728,22 +729,35 @@ jobs:
             with open("/tmp/reports/reporte_final.html", "r") as f:
               reporte_html = f.read()
 
-          if critical == 0 and high == 0:
-            estado   = "APROBADO - Bot pasara automaticamente a carpeta Publica"
+          cred_viol = int(os.environ.get("CREDENTIAL_VIOLATIONS", 0))
+
+          bloqueado = critical > 0 or high > 0 or cred_viol > 0
+
+          if not bloqueado:
+            estado   = "APROBADO - Bot paso a carpeta Publica exitosamente"
             color    = "#28a745"
             emoji    = "[OK]"
-            accion   = "El bot fue aprobado y pasara a Publica automaticamente."
+            razones  = ["Sin violations en Code Analysis", "Sin credenciales expuestas"]
+            accion   = "El bot fue aprobado y paso a Publica automaticamente."
           else:
-            estado   = f"BLOQUEADO - {critical} Critical / {high} High violations encontradas"
+            estado   = "BLOQUEADO - El bot NO paso a Publica"
             color    = "#dc3545"
             emoji    = "[ERROR]"
-            accion   = f"El bot NO paso a Publica. Tiene {critical} violation(es) Critical y {high} High."
+            razones  = []
+            if critical > 0:
+              razones.append(f"{critical} violation(es) Critical en Code Analysis")
+            if high > 0:
+              razones.append(f"{high} violation(es) High en Code Analysis")
+            if cred_viol > 0:
+              razones.append(f"{cred_viol} credencial(es) expuesta(s) encontrada(s)")
+            accion = "Corrige los siguientes problemas antes de pasar a Publica: " + ", ".join(razones)
 
           # Si hay reporte HTML lo usamos como cuerpo
           # Si no, generamos uno simple
           if reporte_html:
             body_html = reporte_html
           else:
+            razones_html = "".join(f"<li>{r}</li>" for r in razones)
             body_html = f"""
             <html><body style="font-family:Arial,sans-serif;margin:20px">
               <h2 style="color:#0078d4">{emoji} Resultado DevSecOps - {bot_name}</h2>
@@ -752,7 +766,8 @@ jobs:
                           font-weight:bold;text-align:center;margin:20px 0">
                 {estado}
               </div>
-              <p>{accion}</p>
+              <p><strong>Detalle:</strong></p>
+              <ul>{razones_html}</ul>
               <a href="{url}" style="background:#0078d4;color:white;padding:12px 24px;
                  text-decoration:none;border-radius:5px;display:inline-block">
                 Ver detalle en GitHub Actions
@@ -861,3 +876,44 @@ jobs:
             print(f"ERROR: {e}")
             sys.exit(1)
           PYEOF
+# =================================================================
+# JOB RESUMEN: Siempre corre al final para mostrar resultado claro
+# =================================================================
+  resumen:
+    name: 'Resultado del pipeline'
+    runs-on: ubuntu-latest
+    needs:
+      - exportar_bot
+      - notificar_lider
+      - publicar_bot
+    if: always()
+    steps:
+      - name: Mostrar resultado
+        env:
+          TOTAL_CRITICAL:        ${{ needs.exportar_bot.outputs.total_critical }}
+          TOTAL_HIGH:            ${{ needs.exportar_bot.outputs.total_high }}
+          CREDENTIAL_VIOLATIONS: ${{ needs.exportar_bot.outputs.credential_violations }}
+          BOT_NOMBRE:            ${{ needs.exportar_bot.outputs.bot_nombre }}
+          PUBLICAR_RESULT:       ${{ needs.publicar_bot.result }}
+        run: |
+          echo "============================================"
+          echo "  RESULTADO FINAL - DevSecOps AA Pipeline"
+          echo "============================================"
+          echo "Bot: $BOT_NOMBRE"
+          echo "Code Analysis Critical: $TOTAL_CRITICAL"
+          echo "Code Analysis High:     $TOTAL_HIGH"
+          echo "Credenciales expuestas: $CREDENTIAL_VIOLATIONS"
+          echo "--------------------------------------------"
+          if [ "$PUBLICAR_RESULT" = "success" ]; then
+            echo "[OK] BOT APROBADO Y PUBLICADO EN PUBLICA"
+          elif [ "$PUBLICAR_RESULT" = "skipped" ]; then
+            echo "[BLOQUEADO] BOT NO PASO A PUBLICA"
+            echo "Motivos:"
+            [ "$TOTAL_CRITICAL" -gt 0 ] 2>/dev/null && echo "  - $TOTAL_CRITICAL violation(es) Critical en Code Analysis"
+            [ "$TOTAL_HIGH" -gt 0 ] 2>/dev/null && echo "  - $TOTAL_HIGH violation(es) High en Code Analysis"
+            [ "$CREDENTIAL_VIOLATIONS" -gt 0 ] 2>/dev/null && echo "  - $CREDENTIAL_VIOLATIONS credencial(es) expuesta(s)"
+            echo "Revisa el correo enviado al lider para el detalle completo."
+          else
+            echo "[ERROR] El check-in a Publica fallo - revisa los logs"
+          fi
+          echo "============================================"
