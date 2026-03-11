@@ -789,52 +789,43 @@ jobs:
 
           hdrs = {"Content-Type": "application/json", "X-Authorization": token}
 
-          # Check-in a Publica - probamos multiples endpoints
-          # AA 360 puede usar distintos formatos segun la version
+          # Check-in de Privada a Publica en AA 360
+          # Basado en la URL del Control Room:
+          # /bots/repository/private/files/{fileId}/checkin
+          # La API sigue el mismo patron con workspaces
+          print(f"Haciendo check-in del bot ID {bot_id} a Publica...")
+
+          checkin_payload = json.dumps({
+            "comment": "Auto check-in via DevSecOps pipeline - aprobado por lider tecnico",
+            "overWriteContent": True
+          }).encode("utf-8")
+
           checkin_endpoints = [
-            {
-              "url": aa_url + "/v2/repository/file/checkin",
-              "payload": json.dumps({
-                "fileId": int(bot_id),
-                "comment": "Auto check-in via DevSecOps pipeline - aprobado por lider tecnico"
-              }).encode("utf-8")
-            },
-            {
-              "url": aa_url + f"/v2/repository/file/{bot_id}/checkin",
-              "payload": json.dumps({
-                "comment": "Auto check-in via DevSecOps pipeline - aprobado por lider tecnico"
-              }).encode("utf-8")
-            },
-            {
-              "url": aa_url + "/v2/repository/files/checkin",
-              "payload": json.dumps({
-                "fileIds": [int(bot_id)],
-                "comment": "Auto check-in via DevSecOps pipeline - aprobado por lider tecnico"
-              }).encode("utf-8")
-            },
+            aa_url + f"/v2/repository/workspaces/private/files/{bot_id}/checkin",
+            aa_url + f"/v3/repository/workspaces/private/files/{bot_id}/checkin",
+            aa_url + f"/v2/repository/workspaces/public/files/{bot_id}/checkin",
+            aa_url + f"/v2/repository/file/{bot_id}/checkin",
           ]
 
           checkin_ok = False
-          for ep in checkin_endpoints:
+          for url in checkin_endpoints:
             try:
-              req = urllib.request.Request(
-                ep["url"], data=ep["payload"], headers=hdrs
-              )
+              req = urllib.request.Request(url, data=checkin_payload, headers=hdrs)
               with urllib.request.urlopen(req, context=ctx, timeout=30) as r:
                 resp = r.read().decode("utf-8")
-                print(f"[OK] Check-in exitoso en: {ep['url']}")
+                print(f"[OK] Check-in exitoso: {url}")
                 print(f"     Respuesta: {resp[:200]}")
                 checkin_ok = True
                 break
             except urllib.error.HTTPError as e:
-              body = e.read().decode("utf-8")
-              print(f"HTTP {e.code} en {ep['url']}: {body[:200]}")
+              body_err = e.read().decode("utf-8")
+              print(f"HTTP {e.code} en {url}: {body_err[:150]}")
               continue
             except Exception as e:
-              print(f"ERROR en {ep['url']}: {e}")
+              print(f"ERROR en {url}: {e}")
               continue
 
           if not checkin_ok:
-            print(f"[ERROR] No se pudo hacer check-in con ninguno de los endpoints")
+            print("ERROR: No se pudo hacer check-in del bot")
             sys.exit(1)
           PYEOF
