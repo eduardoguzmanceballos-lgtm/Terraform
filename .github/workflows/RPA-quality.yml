@@ -92,18 +92,16 @@ jobs:
 
           hdrs = {"Content-Type": "application/json", "X-Authorization": token}
 
-          # -- Buscar bot por nombre EXACTO en workspace PRIVADA --
-          # Filtra por workspaceType PRIVATE para buscar SOLO en Privada
+          # -- Buscar bot por nombre en repositorio --
+          # Busca por nombre y mostramos todos los resultados para debug
           payload = json.dumps({
             "filter": {
-              "operator": "and",
-              "operands": [
-                {"operator": "eq", "field": "name",          "value": bot_name},
-                {"operator": "eq", "field": "workspaceType", "value": "PRIVATE"}
-              ]
+              "operator": "substring",
+              "field": "name",
+              "value": bot_name
             },
-            "fields": ["id", "name", "path", "workspaceType"],
-            "page": {"offset": 0, "length": 10}
+            "fields": ["id", "name", "path", "workspaceType", "parentId"],
+            "page": {"offset": 0, "length": 50}
           }).encode("utf-8")
           req = urllib.request.Request(
             aa_url + "/v2/repository/file/list", data=payload, headers=hdrs
@@ -111,26 +109,47 @@ jobs:
           bot_id = ""
           try:
             with urllib.request.urlopen(req, context=ctx, timeout=30) as r:
-              items = json.loads(r.read().decode("utf-8")).get("list", [])
-              print(f"Bots encontrados en PRIVADA con nombre '{bot_name}': {len(items)}")
+              resp = json.loads(r.read().decode("utf-8"))
+              items = resp.get("list", [])
+              print(f"Total bots encontrados con nombre '{bot_name}': {len(items)}")
+              # Mostrar todos para ver cuales son y de donde vienen
               for item in items:
                 item_name      = item.get("name", "")
                 item_path      = item.get("path", "")
+                item_workspace = item.get("workspaceType", "UNKNOWN")
+                item_id        = str(item.get("id", ""))
+                print(f"  ID: {item_id} | Nombre: {item_name} | Path: {item_path} | Workspace: {item_workspace}")
+
+              # Seleccionar el que coincide exactamente con el nombre
+              # y que sea de workspace PRIVATE si es posible
+              private_match = None
+              any_match     = None
+              for item in items:
+                item_name      = item.get("name", "")
                 item_workspace = item.get("workspaceType", "")
-                print(f"  -> {item_name} | path: {item_path} | workspace: {item_workspace}")
                 if item_name.lower() == bot_name.lower():
-                  bot_id = str(item.get("id", ""))
-                  print(f"[OK] Bot encontrado en PRIVADA: {item_name} | ID: {bot_id}")
-                  break
+                  if item_workspace == "PRIVATE":
+                    private_match = item
+                    break
+                  elif any_match is None:
+                    any_match = item
+
+              chosen = private_match or any_match
+              if chosen:
+                bot_id = str(chosen.get("id", ""))
+                print(f"[OK] Bot seleccionado: {chosen.get('name')} | ID: {bot_id} | Workspace: {chosen.get('workspaceType','')}")
+              
+          except urllib.error.HTTPError as e:
+            body = e.read().decode("utf-8")
+            print(f"ERROR HTTP {e.code} buscando bot: {body[:300]}")
+            sys.exit(1)
           except Exception as e:
             print(f"ERROR buscando bot: {e}")
             sys.exit(1)
 
           if not bot_id:
-            print(f"ERROR: Bot '{bot_name}' no encontrado en Privada")
-            print("Verifica que:")
-            print(f"  1. El nombre sea exacto: '{bot_name}'")
-            print(f"  2. El bot este en la carpeta PRIVADA de AA (no en Publica)")
+            print(f"ERROR: Bot '{bot_name}' no encontrado")
+            print(f"  Verifica que el nombre sea exacto como aparece en AA")
             sys.exit(1)
 
           # -- EXPORTAR BOT (flujo asincrono BLM de AA) --
