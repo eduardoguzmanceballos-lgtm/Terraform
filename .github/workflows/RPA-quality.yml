@@ -51,12 +51,13 @@ jobs:
     name: '1. Exportar bot desde AA Privada'
     runs-on: ubuntu-latest
     outputs:
-      bot_id:        ${{ steps.buscar_bot.outputs.bot_id }}
-      bot_nombre:    ${{ steps.buscar_bot.outputs.bot_nombre }}
-      bot_carpeta:   ${{ steps.buscar_bot.outputs.bot_carpeta }}
-      total_critical: ${{ steps.code_analysis.outputs.total_critical }}
-      total_high:     ${{ steps.code_analysis.outputs.total_high }}
-      total_low:      ${{ steps.code_analysis.outputs.total_low }}
+      bot_id:               ${{ steps.buscar_bot.outputs.bot_id }}
+      bot_nombre:           ${{ steps.buscar_bot.outputs.bot_nombre }}
+      bot_carpeta:          ${{ steps.buscar_bot.outputs.bot_carpeta }}
+      total_critical:       ${{ steps.code_analysis.outputs.total_critical }}
+      total_high:           ${{ steps.code_analysis.outputs.total_high }}
+      total_low:            ${{ steps.code_analysis.outputs.total_low }}
+      credential_violations: ${{ steps.credential_scan.outputs.credential_violations }}
 
     steps:
       - name: Buscar y exportar bot desde AA
@@ -336,12 +337,13 @@ jobs:
           echo "[OK] Todos los archivos tienen sintaxis JSON valida"
 
       - name: Escanear credenciales expuestas
+        id: credential_scan
         run: |
           set +e
           echo "=============================="
           echo "  DETECCION DE CREDENCIALES"
           echo "=============================="
-          WARNINGS=0
+          VIOLATIONS=0
           PATTERNS=("password" "Password" "passwd" "secret" "api_key" "apikey"
                     "connectionstring" "ConnectionString" "Bearer " "Basic " "jdbc:" "mongodb://")
 
@@ -356,18 +358,23 @@ jobs:
                 | grep -v '"variableName"' | grep -v '"lockerName"' | head -3)
               if [ -n "$MATCHES" ]; then
                 if [ "$FILE_WARNED" -eq 0 ]; then
-                  echo "[WARN] Credencial sospechosa en: $(basename $file)"
+                  echo "[ERROR] Credencial expuesta en: $(basename $file)"
                   FILE_WARNED=1
                 fi
-                echo "   Patron: '$pattern'"
-                WARNINGS=$((WARNINGS + 1))
+                echo "   Patron detectado: '$pattern'"
+                VIOLATIONS=$((VIOLATIONS + 1))
               fi
             done
-            [ "$FILE_WARNED" -eq 0 ] && echo "[OK] Sin credenciales: $(basename $file)"
+            [ "$FILE_WARNED" -eq 0 ] && echo "[OK] Sin credenciales expuestas: $(basename $file)"
           done
 
-          echo "Total advertencias: $WARNINGS"
-          [ "$WARNINGS" -gt 0 ] && echo "::warning::$WARNINGS posible(s) credencial(es) expuesta(s)"
+          echo "Total violations de credenciales: $VIOLATIONS"
+          # Exportar como output para el job de publicar
+          echo "credential_violations=$VIOLATIONS" >> $GITHUB_OUTPUT
+
+          if [ "$VIOLATIONS" -gt 0 ]; then
+            echo "::error::$VIOLATIONS credencial(es) expuesta(s) encontrada(s) - bot bloqueado"
+          fi
           exit 0
 
       - name: Verificar buenas practicas
@@ -728,8 +735,10 @@ jobs:
     needs:
       - exportar_bot
       - notificar_lider
-    # Solo pasa a Publica si no hay violations Critical ni High
-    if: ${{ needs.exportar_bot.outputs.total_critical == '0' && needs.exportar_bot.outputs.total_high == '0' }}
+    # Solo pasa a Publica si:
+    # 1. No hay violations Critical ni High en Code Analysis
+    # 2. No hay credenciales expuestas
+    if: ${{ needs.exportar_bot.outputs.total_critical == '0' && needs.exportar_bot.outputs.total_high == '0' && needs.exportar_bot.outputs.credential_violations == '0' }}
 
     steps:
       - name: Check-in del bot a carpeta Publica
