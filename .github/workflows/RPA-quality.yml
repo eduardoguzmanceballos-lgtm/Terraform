@@ -92,17 +92,17 @@ jobs:
 
           hdrs = {"Content-Type": "application/json", "X-Authorization": token}
 
-          # -- Buscar bot por nombre EXACTO y carpeta --
-          # Busca por nombre exacto para evitar tomar el bot equivocado
+          # -- Buscar bot por nombre EXACTO en workspace PRIVADA --
+          # Filtra por workspaceType PRIVATE para buscar SOLO en Privada
           payload = json.dumps({
             "filter": {
               "operator": "and",
               "operands": [
-                {"operator": "eq", "field": "name", "value": bot_name},
-                {"operator": "substring", "field": "path", "value": bot_folder}
+                {"operator": "eq", "field": "name",          "value": bot_name},
+                {"operator": "eq", "field": "workspaceType", "value": "PRIVATE"}
               ]
             },
-            "fields": ["id", "name", "path"],
+            "fields": ["id", "name", "path", "workspaceType"],
             "page": {"offset": 0, "length": 10}
           }).encode("utf-8")
           req = urllib.request.Request(
@@ -112,23 +112,25 @@ jobs:
           try:
             with urllib.request.urlopen(req, context=ctx, timeout=30) as r:
               items = json.loads(r.read().decode("utf-8")).get("list", [])
-              print(f"Bots encontrados con ese nombre y carpeta: {len(items)}")
+              print(f"Bots encontrados en PRIVADA con nombre '{bot_name}': {len(items)}")
               for item in items:
-                item_name = item.get("name", "")
-                item_path = item.get("path", "")
-                print(f"  -> {item_name} | path: {item_path}")
-                # Coincidencia exacta de nombre
+                item_name      = item.get("name", "")
+                item_path      = item.get("path", "")
+                item_workspace = item.get("workspaceType", "")
+                print(f"  -> {item_name} | path: {item_path} | workspace: {item_workspace}")
                 if item_name.lower() == bot_name.lower():
                   bot_id = str(item.get("id", ""))
-                  print(f"Bot exacto encontrado: {item_name} | ID: {bot_id} | Path: {item_path}")
+                  print(f"[OK] Bot encontrado en PRIVADA: {item_name} | ID: {bot_id}")
                   break
           except Exception as e:
             print(f"ERROR buscando bot: {e}")
             sys.exit(1)
 
           if not bot_id:
-            print(f"ERROR: Bot '{bot_name}' no encontrado en carpeta '{bot_folder}'")
-            print("Verifica que el nombre y carpeta sean exactos como aparecen en AA")
+            print(f"ERROR: Bot '{bot_name}' no encontrado en Privada")
+            print("Verifica que:")
+            print(f"  1. El nombre sea exacto: '{bot_name}'")
+            print(f"  2. El bot este en la carpeta PRIVADA de AA (no en Publica)")
             sys.exit(1)
 
           # -- EXPORTAR BOT (flujo asincrono BLM de AA) --
