@@ -281,13 +281,55 @@ jobs:
               z.extractall("/tmp/bots/extracted/")
               archivos = z.namelist()
               print(f"Archivos en zip: {archivos}")
-            json_files = [f for f in archivos if f.endswith(".json")]
-            src = json_files[0] if json_files else archivos[0]
-            shutil.copy(f"/tmp/bots/extracted/{src}", f"/tmp/bots/{bot_name}")
-            print(f"[OK] Bot extraido: {src}")
+
+            # Buscar el archivo del bot dentro de la estructura de carpetas
+            # AA exporta en: Automation Anywhere/Bots/{carpeta}/{nombre_bot}
+            # El bot no tiene extension, es JSON internamente
+            import os as _os
+            bot_file = None
+
+            # Primero buscar por nombre exacto del bot
+            for root, dirs, files in _os.walk("/tmp/bots/extracted/"):
+              for fname in files:
+                fpath = _os.path.join(root, fname)
+                # Ignorar manifest.json y archivos de metadata
+                if fname == "manifest.json":
+                  continue
+                if "Metadata" in root:
+                  continue
+                # El bot real es el archivo sin extension o con nombre del bot
+                if fname == bot_name or not fname.endswith((".png",".xml",".json")):
+                  bot_file = fpath
+                  print(f"Bot encontrado: {fpath}")
+                  break
+              if bot_file:
+                break
+
+            # Si no encontro por nombre, tomar el archivo mas grande que no sea metadata
+            if not bot_file:
+              candidates = []
+              for root, dirs, files in _os.walk("/tmp/bots/extracted/"):
+                for fname in files:
+                  if "Metadata" in root or fname == "manifest.json":
+                    continue
+                  if fname.endswith((".png", ".xml")):
+                    continue
+                  fpath = _os.path.join(root, fname)
+                  candidates.append((fpath, _os.path.getsize(fpath)))
+              if candidates:
+                candidates.sort(key=lambda x: x[1], reverse=True)
+                bot_file = candidates[0][0]
+                print(f"Bot seleccionado (mas grande): {bot_file}")
+
+            if bot_file:
+              shutil.copy(bot_file, f"/tmp/bots/{bot_name}")
+              print(f"[OK] Bot copiado para analisis: {bot_name}")
+            else:
+              print("WARN: No se encontro el archivo del bot, usando primer archivo")
+              shutil.copy(f"/tmp/bots/extracted/{archivos[0]}", f"/tmp/bots/{bot_name}")
+
           except Exception as e:
-            print(f"WARN: No es zip o error extrayendo: {e}")
-            # Puede que sea directamente el archivo, no un zip
+            print(f"WARN: Error extrayendo zip: {e}")
             shutil.copy(zip_path, f"/tmp/bots/{bot_name}")
             print(f"[OK] Archivo guardado directamente como: {bot_name}")
 
