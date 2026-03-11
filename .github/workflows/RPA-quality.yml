@@ -119,20 +119,77 @@ jobs:
             print(f"ERROR: Bot '{bot_name}' no encontrado en AA Privada")
             sys.exit(1)
 
-          # -- Exportar JSON del bot --
-          payload = json.dumps({"fileIds": [bot_id]}).encode("utf-8")
+          # -- EXPORTAR BOT (flujo asincrono de AA) --
+          # PASO 1: Crear solicitud de exportacion
+          # AA no exporta directo, primero crea una solicitud y da un requestId
+          import time, zipfile, shutil
+          print("Iniciando exportacion asincrona...")
+          payload = json.dumps({"fileIds": [bot_id], "includePackages": False}).encode("utf-8")
+          req = urllib.request.Request(aa_url + "/v2/blm/export", data=payload, headers=hdrs)
+          request_id = ""
+          try:
+            with urllib.request.urlopen(req, context=ctx, timeout=30) as r:
+              resp = json.loads(r.read().decode("utf-8"))
+              request_id = resp.get("requestId", "")
+              print(f"Solicitud creada | requestId: {request_id}")
+          except Exception as e:
+            print(f"ERROR creando solicitud: {e}")
+            sys.exit(1)
+
+          if not request_id:
+            print("ERROR: No se obtuvo requestId")
+            sys.exit(1)
+
+          # PASO 2: Esperar a que AA procese la exportacion
+          # AA necesita unos segundos para preparar el archivo
+          status = ""
+          for intento in range(20):
+            time.sleep(3)
+            req = urllib.request.Request(
+              aa_url + f"/v2/blm/export/{request_id}",
+              headers=hdrs, method="GET"
+            )
+            try:
+              with urllib.request.urlopen(req, context=ctx, timeout=30) as r:
+                resp = json.loads(r.read().decode("utf-8"))
+                status = resp.get("status", "")
+                print(f"Intento {intento+1}/20 | Estado: {status}")
+                if status == "SUCCESS":
+                  break
+                elif status in ["FAILED", "ERROR"]:
+                  print(f"ERROR: Exportacion fallida: {status}")
+                  sys.exit(1)
+            except Exception as e:
+              print(f"ERROR verificando estado: {e}")
+
+          if status != "SUCCESS":
+            print(f"ERROR: Tiempo agotado. Estado final: {status}")
+            sys.exit(1)
+
+          # PASO 3: Descargar el zip con el bot
+          print("Descargando archivo exportado...")
           req = urllib.request.Request(
-            aa_url + "/v2/repository/file/export", data=payload, headers=hdrs
+            aa_url + f"/v2/blm/export/{request_id}/file",
+            headers=hdrs, method="GET"
           )
           try:
             with urllib.request.urlopen(req, context=ctx, timeout=60) as r:
               bot_content = r.read()
               os.makedirs("/tmp/bots", exist_ok=True)
-              with open(f"/tmp/bots/{bot_name}", "wb") as f:
-                f.write(bot_content)
-              print(f"Bot exportado: {len(bot_content)} bytes")
+              zip_path = f"/tmp/bots/{bot_name}.zip"
+              open(zip_path, "wb").write(bot_content)
+              print(f"Zip descargado: {len(bot_content)} bytes")
+              # Extraer el zip
+              with zipfile.ZipFile(zip_path, "r") as z:
+                z.extractall("/tmp/bots/extracted/")
+                archivos = z.namelist()
+                print(f"Archivos en zip: {archivos}")
+              # Copiar el archivo del bot
+              if archivos:
+                shutil.copy(f"/tmp/bots/extracted/{archivos[0]}", f"/tmp/bots/{bot_name}")
+                print(f"Bot extraido correctamente")
           except Exception as e:
-            print(f"ERROR exportando bot: {e}")
+            print(f"ERROR descargando archivo: {e}")
             sys.exit(1)
 
           # -- Guardar token para jobs siguientes --
