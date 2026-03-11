@@ -106,11 +106,9 @@ jobs:
           bot_id_manual = os.environ.get("BOT_ID_MANUAL", "").strip()
 
           if bot_id_manual:
-            # Si el dev puso el ID directamente lo usamos sin buscar
             bot_id = bot_id_manual
             print(f"[OK] Usando ID manual: {bot_id}")
           else:
-            # Buscar por nombre en el repositorio
             print(f"Buscando bot '{bot_name}' en AA...")
             payload = json.dumps({
               "filter": {
@@ -132,7 +130,6 @@ jobs:
                 for item in items:
                   print(f"  ID: {item.get('id')} | Nombre: {item.get('name')} | Path: {item.get('path')} | Workspace: {item.get('workspaceType','?')}")
 
-                # Priorizar PRIVATE, si no tomar el exacto
                 for item in items:
                   if item.get("name","").lower() == bot_name.lower() and item.get("workspaceType","") == "PRIVATE":
                     bot_id = str(item.get("id",""))
@@ -155,17 +152,12 @@ jobs:
             if not bot_id:
               print(f"ERROR: Bot '{bot_name}' no encontrado")
               print(f"  Tip: Puedes poner el ID directamente en el campo 'bot_id_manual'")
-              print(f"  El ID lo ves en la URL al editar el bot en AA")
               sys.exit(1)
 
           # -- EXPORTAR BOT (flujo asincrono BLM de AA) --
           import time, zipfile, shutil
 
-          # PASO 1: Crear solicitud de exportacion
-          # Nota: fileIds debe ser lista de enteros, no strings
           print("Iniciando exportacion asincrona BLM...")
-          # El nombre del export debe ser unico en AA
-          # Agregamos timestamp para evitar conflictos con exports anteriores
           from datetime import datetime
           export_name = f"{bot_name}_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
           print(f"Nombre del export: {export_name}")
@@ -198,13 +190,10 @@ jobs:
             print("ERROR: No se obtuvo requestId")
             sys.exit(1)
 
-          # PASO 2: Verificar estado y obtener downloadFileId
-          # AA procesa la exportacion y devuelve un downloadFileId
           status = ""
           download_file_id = ""
           for intento in range(20):
             time.sleep(4)
-            # Intentar ambos formatos de endpoint que usa AA 360
             endpoints_status = [
               f"/v2/blm/export/{request_id}",
               f"/v2/blm/status/{request_id}",
@@ -222,7 +211,7 @@ jobs:
                   break
               except urllib.error.HTTPError as e:
                 if e.code == 404:
-                  continue  # probar el siguiente endpoint
+                  continue
                 body = e.read().decode("utf-8")
                 print(f"HTTP {e.code} en {ep}: {body[:100]}")
               except Exception as e:
@@ -239,10 +228,9 @@ jobs:
             sys.exit(1)
 
           if not download_file_id or download_file_id == "None":
-            print("WARN: No se obtuvo downloadFileId, usando requestId para descargar")
+            print("WARN: No se obtuvo downloadFileId, usando requestId")
             download_file_id = request_id
 
-          # PASO 3: Descargar el zip usando downloadFileId
           print(f"Descargando paquete | downloadFileId: {download_file_id}...")
           endpoints_download = [
             f"/v2/blm/export/{download_file_id}/file",
@@ -270,7 +258,6 @@ jobs:
             print("ERROR: No se pudo descargar el paquete del bot")
             sys.exit(1)
 
-          # Guardar y extraer el zip
           os.makedirs("/tmp/bots", exist_ok=True)
           zip_path = f"/tmp/bots/{bot_name}.zip"
           open(zip_path, "wb").write(bot_content)
@@ -282,22 +269,16 @@ jobs:
               archivos = z.namelist()
               print(f"Archivos en zip: {archivos}")
 
-            # Buscar el archivo del bot dentro de la estructura de carpetas
-            # AA exporta en: Automation Anywhere/Bots/{carpeta}/{nombre_bot}
-            # El bot no tiene extension, es JSON internamente
             import os as _os
             bot_file = None
 
-            # Primero buscar por nombre exacto del bot
             for root, dirs, files in _os.walk("/tmp/bots/extracted/"):
               for fname in files:
                 fpath = _os.path.join(root, fname)
-                # Ignorar manifest.json y archivos de metadata
                 if fname == "manifest.json":
                   continue
                 if "Metadata" in root:
                   continue
-                # El bot real es el archivo sin extension o con nombre del bot
                 if fname == bot_name or not fname.endswith((".png",".xml",".json")):
                   bot_file = fpath
                   print(f"Bot encontrado: {fpath}")
@@ -305,7 +286,6 @@ jobs:
               if bot_file:
                 break
 
-            # Si no encontro por nombre, tomar el archivo mas grande que no sea metadata
             if not bot_file:
               candidates = []
               for root, dirs, files in _os.walk("/tmp/bots/extracted/"):
@@ -333,11 +313,9 @@ jobs:
             shutil.copy(zip_path, f"/tmp/bots/{bot_name}")
             print(f"[OK] Archivo guardado directamente como: {bot_name}")
 
-          # -- Guardar token para jobs siguientes --
           open("/tmp/aa_token.txt", "w").write(token)
           open("/tmp/bot_id.txt", "w").write(bot_id)
 
-          # -- Outputs para GitHub Actions --
           with open(os.environ["GITHUB_OUTPUT"], "a") as f:
             f.write(f"bot_id={bot_id}\n")
             f.write(f"bot_nombre={bot_name}\n")
@@ -345,7 +323,7 @@ jobs:
           PYEOF
 
       # -----------------------------------------------------------------
-      # ANALISIS DEL BOT (mismo job que export, sin artifact intermedio)
+      # ANALISIS DEL BOT
       # -----------------------------------------------------------------
       - name: Validar sintaxis JSON
         env:
@@ -356,7 +334,6 @@ jobs:
           echo "  VALIDACION DE SINTAXIS JSON"
           echo "=============================="
           ERRORS=0
-          # Analizar solo el archivo del bot, no manifest ni metadata
           BOT_FILE="/tmp/bots/$BOT_NOMBRE"
           [ ! -f "$BOT_FILE" ] && BOT_FILE=$(find /tmp/bots/ -type f -not -name "*.zip" -not -name "manifest.json" -not -name "*.png" -not -name "*.xml" | head -1)
           echo "Validando: $BOT_FILE"
@@ -382,10 +359,8 @@ jobs:
           echo "  DETECCION DE CREDENCIALES"
           echo "=============================="
           VIOLATIONS=0
-          PATTERNS=("password" "Password" "passwd" "secret" "api_key" "apikey"
-                    "connectionstring" "ConnectionString" "Bearer " "Basic " "jdbc:" "mongodb://")
+          CRED_DETAILS=""
 
-          # Analizar SOLO el archivo del bot copiado, no el zip ni manifest
           BOT_FILE="/tmp/bots/$BOT_NOMBRE"
           if [ ! -f "$BOT_FILE" ]; then
             echo "[WARN] No se encontro el bot en /tmp/bots/$BOT_NOMBRE"
@@ -396,19 +371,19 @@ jobs:
           if [ -f "$BOT_FILE" ]; then
             FILE_WARNED=0
 
-            # Deteccion 1: variable con nombre sensible asignada en el bot
             for var in password passwd secret api_key apikey token connectionstring; do
-              if grep -qi ""variableName".*".*${var}.*"" "$BOT_FILE" 2>/dev/null; then
+              if grep -qi "\"variableName\".*\".*${var}.*\"" "$BOT_FILE" 2>/dev/null; then
                 echo "[ERROR] Variable sensible encontrada: $var"
+                CRED_DETAILS="${CRED_DETAILS}Variable sensible: $var;"
                 FILE_WARNED=1
                 VIOLATIONS=$((VIOLATIONS + 1))
               fi
             done
 
-            # Deteccion 2: strings hardcodeados con patrones de credenciales
             for pattern in "jdbc:" "mongodb://" "postgresql://" "mysql://" "password=" "pwd="; do
               if grep -q "$pattern" "$BOT_FILE" 2>/dev/null; then
                 echo "[ERROR] Credencial hardcodeada detectada: $pattern"
+                CRED_DETAILS="${CRED_DETAILS}Credencial hardcodeada: $pattern;"
                 FILE_WARNED=1
                 VIOLATIONS=$((VIOLATIONS + 1))
               fi
@@ -420,8 +395,8 @@ jobs:
           fi
 
           echo "Total violations de credenciales: $VIOLATIONS"
-          # Exportar como output para el job de publicar
           echo "credential_violations=$VIOLATIONS" >> $GITHUB_OUTPUT
+          echo "credential_details=$CRED_DETAILS" >> $GITHUB_OUTPUT
 
           if [ "$VIOLATIONS" -gt 0 ]; then
             echo "::error::$VIOLATIONS credencial(es) expuesta(s) encontrada(s) - bot bloqueado"
@@ -429,6 +404,7 @@ jobs:
           exit 0
 
       - name: Verificar buenas practicas
+        id: best_practices
         env:
           BOT_NOMBRE: ${{ steps.buscar_bot.outputs.bot_nombre }}
         run: |
@@ -438,20 +414,33 @@ jobs:
           echo "=============================="
           BOT_FILE="/tmp/bots/$BOT_NOMBRE"
           [ ! -f "$BOT_FILE" ] && BOT_FILE=$(find /tmp/bots/ -type f -not -name "*.zip" -not -name "manifest.json" -not -name "*.png" -not -name "*.xml" | head -1)
+
+          BP_TRY="false"; BP_COMMENTS=0; BP_VAULT="false"
           for file in "$BOT_FILE"; do
             [ -f "$file" ] || continue
             echo "Bot: $(basename $file)"
-            grep -q '"commandName":"try"' "$file" \
-              && echo "  [OK] Tiene manejo de errores" \
-              || echo "  [WARN] Sin try/catch"
-            COMMENTS=$(grep -c '"commandName":"Comment"' "$file" 2>/dev/null || echo 0)
-            [ "$COMMENTS" -gt 0 ] \
-              && echo "  [OK] Tiene $COMMENTS comentario(s)" \
+            if grep -q '"commandName":"try"' "$file"; then
+              echo "  [OK] Tiene manejo de errores"
+              BP_TRY="true"
+            else
+              echo "  [WARN] Sin try/catch"
+            fi
+            BP_COMMENTS=$(grep -c '"commandName":"Comment"' "$file" 2>/dev/null || echo 0)
+            [ "$BP_COMMENTS" -gt 0 ] \
+              && echo "  [OK] Tiene $BP_COMMENTS comentario(s)" \
               || echo "  [WARN] Sin comentarios"
-            grep -q '"lockerName"' "$file" \
-              && echo "  [OK] Usa Credential Vault" \
-              || echo "  [INFO] No usa Credential Vault"
+            if grep -q '"lockerName"' "$file"; then
+              echo "  [OK] Usa Credential Vault"
+              BP_VAULT="true"
+            else
+              echo "  [INFO] No usa Credential Vault"
+            fi
           done
+
+          mkdir -p /tmp/reports
+          printf '{"try_catch": %s, "comments": %d, "credential_vault": %s}' \
+            "$BP_TRY" "$BP_COMMENTS" "$BP_VAULT" > /tmp/reports/best_practices.json
+          echo "Best practices guardadas"
           exit 0
 
       - name: Code Analysis de AA via API
@@ -476,7 +465,6 @@ jobs:
 
           ctx = ssl.create_default_context()
 
-          # Login
           payload = json.dumps({"username": username, "apiKey": api_key}).encode("utf-8")
           req = urllib.request.Request(
             aa_url + endpoint, data=payload,
@@ -492,7 +480,6 @@ jobs:
           hdrs    = {"Content-Type": "application/json", "X-Authorization": token}
           payload = json.dumps({"fileId": bot_id, "excludeChildBots": True}).encode("utf-8")
 
-          # Summary
           crit=0; high=0; low=0; issues=[]
           try:
             req = urllib.request.Request(
@@ -507,7 +494,6 @@ jobs:
           except Exception as e:
             print(f"ERROR Code Analysis: {e}", file=sys.stderr)
 
-          # Details
           try:
             req = urllib.request.Request(
               aa_url + "/v2/policy/bot/analysis/details", data=payload, headers=hdrs
@@ -528,13 +514,11 @@ jobs:
           except Exception as e:
             print(f"ERROR detalles: {e}", file=sys.stderr)
 
-          # Guardar reporte para el siguiente step
           report = {"bot": bot_name, "critical": crit, "high": high, "low": low, "issues": issues}
           os.makedirs("/tmp/reports", exist_ok=True)
           with open("/tmp/reports/aa_analysis.json", "w") as f:
             json.dump(report, f, indent=2)
 
-          # GitHub Actions outputs
           with open(os.environ["GITHUB_OUTPUT"], "a") as f:
             f.write(f"total_critical={crit}\n")
             f.write(f"total_high={high}\n")
@@ -553,10 +537,11 @@ jobs:
       - name: Generar reporte HTML
         id: generar_reporte
         env:
-          BOT_NOMBRE:  ${{ steps.buscar_bot.outputs.bot_nombre }}
-          BOT_CARPETA: ${{ steps.buscar_bot.outputs.bot_carpeta }}
-          RUN_ID:      ${{ github.run_id }}
-          REPO:        ${{ github.repository }}
+          BOT_NOMBRE:            ${{ steps.buscar_bot.outputs.bot_nombre }}
+          BOT_CARPETA:           ${{ steps.buscar_bot.outputs.bot_carpeta }}
+          RUN_ID:                ${{ github.run_id }}
+          REPO:                  ${{ github.repository }}
+          CREDENTIAL_VIOLATIONS: ${{ steps.credential_scan.outputs.credential_violations }}
         run: |
           python3 - << 'PYEOF'
           import json, os
@@ -566,26 +551,45 @@ jobs:
           run_id     = os.environ["RUN_ID"]
           repo       = os.environ["REPO"]
 
+          # --- Code Analysis ---
           report = {"bot": bot_name, "critical": 0, "high": 0, "low": 0, "issues": []}
           if os.path.exists("/tmp/reports/aa_analysis.json"):
             with open("/tmp/reports/aa_analysis.json") as f:
               report = json.load(f)
-
-          c = report.get("critical", 0)
-          h = report.get("high", 0)
-          l = report.get("low", 0)
+          c      = report.get("critical", 0)
+          h      = report.get("high", 0)
+          l      = report.get("low", 0)
           issues = report.get("issues", [])
 
-          if c == 0 and h == 0:
-            gate_color  = "#28a745"
-            gate_status = "APROBADO AUTOMATICAMENTE - Listo para pasar a Publica"
-          else:
-            gate_color  = "#dc3545"
-            gate_status = f"BLOQUEADO - {c} Critical / {h} High - Requiere aprobacion"
+          # --- Credenciales ---
+          cred_viol = int(os.environ.get("CREDENTIAL_VIOLATIONS", "0"))
 
+          # --- Buenas practicas ---
+          bp = {"try_catch": False, "comments": 0, "credential_vault": False}
+          if os.path.exists("/tmp/reports/best_practices.json"):
+            with open("/tmp/reports/best_practices.json") as f:
+              bp = json.load(f)
+          bp_try   = bp.get("try_catch", False)
+          bp_cmts  = int(bp.get("comments", 0))
+          bp_vault = bp.get("credential_vault", False)
+
+          # --- Gate: considera TODO ---
+          bloqueado = c > 0 or h > 0 or cred_viol > 0
+          if bloqueado:
+            gate_color = "#dc3545"
+            razones_gate = []
+            if c > 0:         razones_gate.append(f"{c} violation(es) Critical en Code Analysis")
+            if h > 0:         razones_gate.append(f"{h} violation(es) High en Code Analysis")
+            if cred_viol > 0: razones_gate.append(f"{cred_viol} credencial(es) expuesta(s)")
+            gate_status = "RECHAZADO - " + " | ".join(razones_gate)
+          else:
+            gate_color  = "#28a745"
+            gate_status = "APROBADO - Listo para pasar a Publica"
+
+          # --- Filas violations Code Analysis ---
           issues_rows = ""
           for issue in issues:
-            sev = issue.get("severity", "")
+            sev   = issue.get("severity", "")
             color = "#dc3545" if sev == "CRITICAL" else "#ff6600" if sev == "HIGH" else "#ffc107"
             issues_rows += f"""
             <tr>
@@ -595,10 +599,29 @@ jobs:
               <td style="color:{color};font-weight:bold">{sev}</td>
             </tr>"""
 
+          # --- Filas validaciones con resultado real ---
+          def val_row(label, ok, detail=""):
+            icon  = "&#10003;" if ok else "&#9888;"
+            color = "#28a745" if ok else "#e67e22"
+            text  = detail if detail else ("Correcto" if ok else "Advertencia")
+            bg    = "#f0fff4" if ok else "#fff8f0"
+            return f"<tr style='background:{bg}'><td>{icon} {label}</td><td style='color:{color};font-weight:bold'>{text}</td></tr>"
+
+          val_rows  = val_row("Sintaxis JSON", True, "Valida")
+          val_rows += val_row("Credenciales expuestas", cred_viol == 0,
+                              "Sin credenciales hardcodeadas" if cred_viol == 0 else f"{cred_viol} credencial(es) encontrada(s)")
+          val_rows += val_row("Manejo de errores (try/catch)", bp_try,
+                              "Implementado" if bp_try else "Sin bloque try/catch")
+          val_rows += val_row("Comentarios en el bot", bp_cmts > 0,
+                              f"{bp_cmts} comentario(s)" if bp_cmts > 0 else "Sin comentarios")
+          val_rows += val_row("Credential Vault", bp_vault,
+                              "Usa Credential Vault" if bp_vault else "No usa Credential Vault (informativo)")
+          val_rows += val_row("Code Analysis AA", c == 0 and h == 0,
+                              "Sin violations criticas" if c == 0 and h == 0 else f"{c} Critical / {h} High")
+
           url = f"https://github.com/{repo}/actions/runs/{run_id}"
 
-          html = f"""
-          <!DOCTYPE html>
+          html = f"""<!DOCTYPE html>
           <html>
           <head>
             <meta charset="UTF-8">
@@ -610,7 +633,6 @@ jobs:
               table {{ border-collapse: collapse; width: 100%; margin-top: 10px; }}
               th {{ background: #0078d4; color: white; padding: 10px; text-align: left; }}
               td {{ border: 1px solid #ddd; padding: 8px; }}
-              tr:nth-child(even) {{ background: #f9f9f9; }}
               .gate {{ padding: 20px; border-radius: 8px; text-align: center;
                        font-size: 16px; font-weight: bold; margin: 20px 0;
                        background: {gate_color}22; border: 2px solid {gate_color}; color: {gate_color}; }}
@@ -631,6 +653,12 @@ jobs:
             <h2>Estado del Gate DevSecOps</h2>
             <div class="gate">{gate_status}</div>
 
+            <h2>Validaciones realizadas</h2>
+            <table>
+              <tr><th>Validacion</th><th>Resultado</th></tr>
+              {val_rows}
+            </table>
+
             <h2>Resumen Code Analysis</h2>
             <table>
               <tr><th>Severidad</th><th>Cantidad</th></tr>
@@ -639,19 +667,11 @@ jobs:
               <tr><td style="color:orange">Low</td><td>{l}</td></tr>
             </table>
 
-            <h2>Detalle de Violations</h2>
+            <h2>Detalle de Violations (Code Analysis)</h2>
             <table>
               <tr><th>Variable</th><th>Regla</th><th>Descripcion</th><th>Severidad</th></tr>
               {issues_rows if issues_rows else "<tr><td colspan='4' style='text-align:center'>Sin violations</td></tr>"}
             </table>
-
-            <h2>Validaciones realizadas</h2>
-            <ul>
-              <li>[OK] Sintaxis JSON valida</li>
-              <li>[OK] Escaneo de credenciales</li>
-              <li>[OK] Buenas practicas (try/catch, comentarios, Credential Vault)</li>
-              <li>[OK] Code Analysis nativo de Automation Anywhere</li>
-            </ul>
 
             <br>
             <a class="btn" href="{url}">Ver detalle en GitHub Actions</a>
@@ -674,12 +694,7 @@ jobs:
           retention-days: 7
 
 # =================================================================
-# JOB 3: NOTIFICAR AL LIDER Y DECIDIR SI PASA A PUBLICA
-# - Sin violations Critical/High -> pasa automatico a Publica
-# - Con violations Critical/High -> se queda en Privada
-# El reporte HTML completo llega al correo del lider
-# Para agregar mas destinatarios separar con coma en MAIL_TO:
-#   MAIL_TO = "lider@empresa.com,otro@empresa.com"
+# JOB 2: NOTIFICAR AL LIDER
 # =================================================================
   notificar_lider:
     name: '2. Notificar al lider por correo'
@@ -696,7 +711,7 @@ jobs:
 
       - name: Enviar reporte completo al lider
         env:
-          MAIL_USERNAME:  ${{ secrets.MAIL_USERNAME }}
+          MAIL_USERNAME:         ${{ secrets.MAIL_USERNAME }}
           MAIL_PASSWORD:         ${{ secrets.MAIL_PASSWORD }}
           MAIL_TO:               ${{ secrets.MAIL_TO }}
           BOT_NOMBRE:            ${{ needs.exportar_bot.outputs.bot_nombre }}
@@ -711,53 +726,35 @@ jobs:
           from email.mime.multipart import MIMEMultipart
           from email.mime.text import MIMEText
 
-          mail_from = os.environ["MAIL_USERNAME"]
-          mail_pass = os.environ["MAIL_PASSWORD"]
-          # Soporta multiples destinatarios separados por coma
-          mail_to_raw = os.environ["MAIL_TO"]
-          mail_to_list = [m.strip() for m in mail_to_raw.split(",")]
-          bot_name  = os.environ["BOT_NOMBRE"]
-          critical  = int(os.environ.get("TOTAL_CRITICAL", 0))
-          high      = int(os.environ.get("TOTAL_HIGH", 0))
-          run_id    = os.environ["RUN_ID"]
-          repo      = os.environ["REPO"]
-          url       = f"https://github.com/{repo}/actions/runs/{run_id}"
+          mail_from     = os.environ["MAIL_USERNAME"]
+          mail_pass     = os.environ["MAIL_PASSWORD"]
+          mail_to_list  = [m.strip() for m in os.environ["MAIL_TO"].split(",")]
+          bot_name      = os.environ["BOT_NOMBRE"]
+          critical      = int(os.environ.get("TOTAL_CRITICAL", 0))
+          high          = int(os.environ.get("TOTAL_HIGH", 0))
+          cred_viol     = int(os.environ.get("CREDENTIAL_VIOLATIONS", 0))
+          run_id        = os.environ["RUN_ID"]
+          repo          = os.environ["REPO"]
+          url           = f"https://github.com/{repo}/actions/runs/{run_id}"
 
-          # Leer el reporte HTML generado por el Job 2
+          bloqueado = critical > 0 or high > 0 or cred_viol > 0
+          emoji     = "[ERROR]" if bloqueado else "[OK]"
+          estado    = "RECHAZADO" if bloqueado else "APROBADO"
+
           reporte_html = ""
           if os.path.exists("/tmp/reports/reporte_final.html"):
             with open("/tmp/reports/reporte_final.html", "r") as f:
               reporte_html = f.read()
 
-          cred_viol = int(os.environ.get("CREDENTIAL_VIOLATIONS", 0))
-
-          bloqueado = critical > 0 or high > 0 or cred_viol > 0
-
-          if not bloqueado:
-            estado   = "APROBADO - Bot paso a carpeta Publica exitosamente"
-            color    = "#28a745"
-            emoji    = "[OK]"
-            razones  = ["Sin violations en Code Analysis", "Sin credenciales expuestas"]
-            accion   = "El bot fue aprobado y paso a Publica automaticamente."
-          else:
-            estado   = "BLOQUEADO - El bot NO paso a Publica"
-            color    = "#dc3545"
-            emoji    = "[ERROR]"
-            razones  = []
-            if critical > 0:
-              razones.append(f"{critical} violation(es) Critical en Code Analysis")
-            if high > 0:
-              razones.append(f"{high} violation(es) High en Code Analysis")
-            if cred_viol > 0:
-              razones.append(f"{cred_viol} credencial(es) expuesta(s) encontrada(s)")
-            accion = "Corrige los siguientes problemas antes de pasar a Publica: " + ", ".join(razones)
-
-          # Si hay reporte HTML lo usamos como cuerpo
-          # Si no, generamos uno simple
           if reporte_html:
             body_html = reporte_html
           else:
+            razones = []
+            if critical > 0: razones.append(f"{critical} violation(es) Critical")
+            if high > 0:     razones.append(f"{high} violation(es) High")
+            if cred_viol > 0: razones.append(f"{cred_viol} credencial(es) expuesta(s)")
             razones_html = "".join(f"<li>{r}</li>" for r in razones)
+            color = "#dc3545" if bloqueado else "#28a745"
             body_html = f"""
             <html><body style="font-family:Arial,sans-serif;margin:20px">
               <h2 style="color:#0078d4">{emoji} Resultado DevSecOps - {bot_name}</h2>
@@ -766,7 +763,6 @@ jobs:
                           font-weight:bold;text-align:center;margin:20px 0">
                 {estado}
               </div>
-              <p><strong>Detalle:</strong></p>
               <ul>{razones_html}</ul>
               <a href="{url}" style="background:#0078d4;color:white;padding:12px 24px;
                  text-decoration:none;border-radius:5px;display:inline-block">
@@ -792,10 +788,8 @@ jobs:
           PYEOF
 
 # =================================================================
-# JOB 4: CHECK-IN A PUBLICA EN AA
-# Solo corre si NO hay violations Critical ni High
-# Si hay violations el bot se queda en Privada y el correo
-# ya notificó al lider con el detalle de los problemas
+# JOB 3: CHECK-IN A PUBLICA EN AA
+# Solo corre si no hay violations Critical/High ni credenciales
 # =================================================================
   publicar_bot:
     name: '3. Check-in a Publica en AA'
@@ -803,9 +797,6 @@ jobs:
     needs:
       - exportar_bot
       - notificar_lider
-    # Solo pasa a Publica si:
-    # 1. No hay violations Critical ni High en Code Analysis
-    # 2. No hay credenciales expuestas
     if: ${{ needs.exportar_bot.outputs.total_critical == '0' && needs.exportar_bot.outputs.total_high == '0' && needs.exportar_bot.outputs.credential_violations == '0' }}
 
     steps:
@@ -830,7 +821,6 @@ jobs:
 
           ctx = ssl.create_default_context()
 
-          # Login
           payload = json.dumps({"username": username, "apiKey": api_key}).encode("utf-8")
           req = urllib.request.Request(
             aa_url + endpoint, data=payload,
@@ -845,10 +835,7 @@ jobs:
 
           hdrs = {"Content-Type": "application/json", "X-Authorization": token}
 
-          # Check-in de Privada a Publica en AA 360
-          # Endpoint capturado del Network del navegador:
-          # PUT /v3/repository/checkin
-          # Payload: { "ids": ["fileId"], "comment": "..." }
+          # PUT /v3/repository/checkin - capturado del Network del navegador
           print(f"Haciendo check-in del bot ID {bot_id} a Publica...")
 
           checkin_payload = json.dumps({
@@ -856,7 +843,6 @@ jobs:
             "comment": "Auto check-in DevSecOps pipeline"
           }).encode("utf-8")
 
-          # PUT en vez de POST
           req = urllib.request.Request(
             aa_url + "/v3/repository/checkin",
             data=checkin_payload,
@@ -876,8 +862,9 @@ jobs:
             print(f"ERROR: {e}")
             sys.exit(1)
           PYEOF
+
 # =================================================================
-# JOB RESUMEN: Siempre corre al final para mostrar resultado claro
+# JOB RESUMEN: Siempre corre al final
 # =================================================================
   resumen:
     name: 'Resultado del pipeline'
@@ -907,7 +894,7 @@ jobs:
           if [ "$PUBLICAR_RESULT" = "success" ]; then
             echo "[OK] BOT APROBADO Y PUBLICADO EN PUBLICA"
           elif [ "$PUBLICAR_RESULT" = "skipped" ]; then
-            echo "[BLOQUEADO] BOT NO PASO A PUBLICA"
+            echo "[RECHAZADO] BOT NO PASO A PUBLICA"
             echo "Motivos:"
             [ "$TOTAL_CRITICAL" -gt 0 ] 2>/dev/null && echo "  - $TOTAL_CRITICAL violation(es) Critical en Code Analysis"
             [ "$TOTAL_HIGH" -gt 0 ] 2>/dev/null && echo "  - $TOTAL_HIGH violation(es) High en Code Analysis"
