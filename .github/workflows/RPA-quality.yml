@@ -348,30 +348,24 @@ jobs:
       # ANALISIS DEL BOT (mismo job que export, sin artifact intermedio)
       # -----------------------------------------------------------------
       - name: Validar sintaxis JSON
+        env:
+          BOT_NOMBRE: ${{ steps.buscar_bot.outputs.bot_nombre }}
         run: |
           set +e
           echo "=============================="
           echo "  VALIDACION DE SINTAXIS JSON"
           echo "=============================="
           ERRORS=0
-          # Buscar archivos del bot en la carpeta extraida
-          # Los bots de AA pueden tener extension .json, .bot, .taskbot
-          BOT_FILES=$(find /tmp/bots/extracted/ -type f 2>/dev/null)
-          if [ -z "$BOT_FILES" ]; then
-            echo "[WARN] No se encontraron archivos en extracted, revisando /tmp/bots/"
-            BOT_FILES=$(find /tmp/bots/ -type f -not -name "*.zip" 2>/dev/null)
+          # Analizar solo el archivo del bot, no manifest ni metadata
+          BOT_FILE="/tmp/bots/$BOT_NOMBRE"
+          [ ! -f "$BOT_FILE" ] && BOT_FILE=$(find /tmp/bots/ -type f -not -name "*.zip" -not -name "manifest.json" -not -name "*.png" -not -name "*.xml" | head -1)
+          echo "Validando: $BOT_FILE"
+          if python3 -c "import json; json.load(open('$BOT_FILE'))" 2>/dev/null; then
+            echo "[OK] Sintaxis JSON valida: $(basename $BOT_FILE)"
+          else
+            echo "[ERROR] Sintaxis invalida: $(basename $BOT_FILE)"
+            ERRORS=$((ERRORS + 1))
           fi
-
-          for file in $BOT_FILES; do
-            [ -f "$file" ] || continue
-            echo "Validando: $(basename $file)"
-            if python3 -c "import json; json.load(open('$file'))" 2>/dev/null; then
-              echo "[OK] Sintaxis JSON valida: $(basename $file)"
-            else
-              echo "[ERROR] Sintaxis invalida (puede ser formato binario): $(basename $file)"
-              ERRORS=$((ERRORS + 1))
-            fi
-          done
           if [ "$ERRORS" -gt 0 ]; then
             echo "::error::$ERRORS archivo(s) con sintaxis JSON invalida"
             exit 1
@@ -380,6 +374,8 @@ jobs:
 
       - name: Escanear credenciales expuestas
         id: credential_scan
+        env:
+          BOT_NOMBRE: ${{ steps.buscar_bot.outputs.bot_nombre }}
         run: |
           set +e
           echo "=============================="
@@ -389,26 +385,32 @@ jobs:
           PATTERNS=("password" "Password" "passwd" "secret" "api_key" "apikey"
                     "connectionstring" "ConnectionString" "Bearer " "Basic " "jdbc:" "mongodb://")
 
-          BOT_FILES=$(find /tmp/bots/extracted/ -type f 2>/dev/null)
-          [ -z "$BOT_FILES" ] && BOT_FILES=$(find /tmp/bots/ -type f -not -name "*.zip" 2>/dev/null)
-          for file in $BOT_FILES; do
-            [ -f "$file" ] || continue
+          # Analizar SOLO el archivo del bot copiado, no el zip ni manifest
+          BOT_FILE="/tmp/bots/$BOT_NOMBRE"
+          if [ ! -f "$BOT_FILE" ]; then
+            echo "[WARN] No se encontro el bot en /tmp/bots/$BOT_NOMBRE"
+            BOT_FILE=$(find /tmp/bots/ -type f -not -name "*.zip" -not -name "manifest.json" -not -name "*.png" -not -name "*.xml" | head -1)
+          fi
+          echo "Analizando credenciales en: $BOT_FILE"
+
+          if [ -f "$BOT_FILE" ]; then
             FILE_WARNED=0
             for pattern in "${PATTERNS[@]}"; do
-              MATCHES=$(grep -n "$pattern" "$file" 2>/dev/null \
-                | grep '"string"' | grep -v '"expression"' \
-                | grep -v '"variableName"' | grep -v '"lockerName"' | head -3)
+              MATCHES=$(grep -n "$pattern" "$BOT_FILE" 2>/dev/null                 | grep -v '"expression"'                 | grep -v '"variableName"'                 | grep -v '"lockerName"'                 | grep -v '"name"' | head -3)
               if [ -n "$MATCHES" ]; then
                 if [ "$FILE_WARNED" -eq 0 ]; then
-                  echo "[ERROR] Credencial expuesta en: $(basename $file)"
+                  echo "[ERROR] Credencial expuesta en: $(basename $BOT_FILE)"
                   FILE_WARNED=1
                 fi
                 echo "   Patron detectado: '$pattern'"
+                echo "   Lineas: $MATCHES"
                 VIOLATIONS=$((VIOLATIONS + 1))
               fi
             done
-            [ "$FILE_WARNED" -eq 0 ] && echo "[OK] Sin credenciales expuestas: $(basename $file)"
-          done
+            [ "$FILE_WARNED" -eq 0 ] && echo "[OK] Sin credenciales expuestas: $(basename $BOT_FILE)"
+          else
+            echo "[WARN] No se encontro archivo de bot para analizar"
+          fi
 
           echo "Total violations de credenciales: $VIOLATIONS"
           # Exportar como output para el job de publicar
@@ -420,14 +422,16 @@ jobs:
           exit 0
 
       - name: Verificar buenas practicas
+        env:
+          BOT_NOMBRE: ${{ steps.buscar_bot.outputs.bot_nombre }}
         run: |
           set +e
           echo "=============================="
           echo "  BUENAS PRACTICAS"
           echo "=============================="
-          BOT_FILES=$(find /tmp/bots/extracted/ -type f 2>/dev/null)
-          [ -z "$BOT_FILES" ] && BOT_FILES=$(find /tmp/bots/ -type f -not -name "*.zip" 2>/dev/null)
-          for file in $BOT_FILES; do
+          BOT_FILE="/tmp/bots/$BOT_NOMBRE"
+          [ ! -f "$BOT_FILE" ] && BOT_FILE=$(find /tmp/bots/ -type f -not -name "*.zip" -not -name "manifest.json" -not -name "*.png" -not -name "*.xml" | head -1)
+          for file in "$BOT_FILE"; do
             [ -f "$file" ] || continue
             echo "Bot: $(basename $file)"
             grep -q '"commandName":"try"' "$file" \
