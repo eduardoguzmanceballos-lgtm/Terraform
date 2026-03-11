@@ -622,7 +622,7 @@ jobs:
 #   MAIL_TO = "lider@empresa.com,otro@empresa.com"
 # =================================================================
   notificar_lider:
-    name: '3. Notificar al lider por correo'
+    name: '2. Notificar al lider por correo'
     runs-on: ubuntu-latest
     needs:
       - exportar_bot
@@ -723,7 +723,7 @@ jobs:
 # ya notificó al lider con el detalle de los problemas
 # =================================================================
   publicar_bot:
-    name: '4. Check-in a Publica en AA'
+    name: '3. Check-in a Publica en AA'
     runs-on: ubuntu-latest
     needs:
       - exportar_bot
@@ -738,8 +738,8 @@ jobs:
           AA_USERNAME:      ${{ secrets.AA_USERNAME }}
           AA_API_KEY:       ${{ secrets.AA_API_KEY }}
           AA_AUTH_ENDPOINT: ${{ secrets.AA_AUTH_ENDPOINT }}
-          BOT_ID:           ${{ steps.buscar_bot.outputs.bot_id }}
-          BOT_NOMBRE:       ${{ steps.buscar_bot.outputs.bot_nombre }}
+          BOT_ID:           ${{ needs.exportar_bot.outputs.bot_id }}
+          BOT_NOMBRE:       ${{ needs.exportar_bot.outputs.bot_nombre }}
         run: |
           python3 - << 'PYEOF'
           import json, urllib.request, ssl, os, sys
