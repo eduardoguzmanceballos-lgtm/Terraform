@@ -30,13 +30,18 @@ on:
   workflow_dispatch:
     inputs:
       bot_nombre:
-        description: 'Nombre del bot en AA (ej: Bot_Facturacion)'
+        description: 'Nombre del bot en AA (ej: Calidad)'
         required: true
         type: string
       bot_carpeta:
-        description: 'Carpeta del bot en AA Privada (ej: Bots/Finanzas)'
+        description: 'Carpeta del bot en AA Privada (ej: Bots/DevSecOps)'
         required: true
         type: string
+      bot_id_manual:
+        description: 'ID del bot en AA (opcional - lo ves en la URL al editar el bot)'
+        required: false
+        type: string
+        default: 
 
 # =================================================================
 # JOB 1: BUSCAR Y EXPORTAR BOT DESDE AA PRIVADA
@@ -60,6 +65,7 @@ jobs:
           AA_AUTH_ENDPOINT: ${{ secrets.AA_AUTH_ENDPOINT }}
           BOT_NOMBRE:       ${{ github.event.inputs.bot_nombre }}
           BOT_CARPETA:      ${{ github.event.inputs.bot_carpeta }}
+          BOT_ID_MANUAL:    ${{ github.event.inputs.bot_id_manual }}
         run: |
           python3 - << 'PYEOF'
           import json, urllib.request, ssl, os, sys
@@ -92,65 +98,61 @@ jobs:
 
           hdrs = {"Content-Type": "application/json", "X-Authorization": token}
 
-          # -- Buscar bot por nombre en repositorio --
-          # Busca por nombre y mostramos todos los resultados para debug
-          payload = json.dumps({
-            "filter": {
-              "operator": "substring",
-              "field": "name",
-              "value": bot_name
-            },
-            "fields": ["id", "name", "path", "workspaceType", "parentId"],
-            "page": {"offset": 0, "length": 50}
-          }).encode("utf-8")
-          req = urllib.request.Request(
-            aa_url + "/v2/repository/file/list", data=payload, headers=hdrs
-          )
-          bot_id = ""
-          try:
-            with urllib.request.urlopen(req, context=ctx, timeout=30) as r:
-              resp = json.loads(r.read().decode("utf-8"))
-              items = resp.get("list", [])
-              print(f"Total bots encontrados con nombre '{bot_name}': {len(items)}")
-              # Mostrar todos para ver cuales son y de donde vienen
-              for item in items:
-                item_name      = item.get("name", "")
-                item_path      = item.get("path", "")
-                item_workspace = item.get("workspaceType", "UNKNOWN")
-                item_id        = str(item.get("id", ""))
-                print(f"  ID: {item_id} | Nombre: {item_name} | Path: {item_path} | Workspace: {item_workspace}")
+          # -- Buscar bot: si viene ID manual lo usa directo, si no busca por nombre --
+          bot_id_manual = os.environ.get("BOT_ID_MANUAL", "").strip()
 
-              # Seleccionar el que coincide exactamente con el nombre
-              # y que sea de workspace PRIVATE si es posible
-              private_match = None
-              any_match     = None
-              for item in items:
-                item_name      = item.get("name", "")
-                item_workspace = item.get("workspaceType", "")
-                if item_name.lower() == bot_name.lower():
-                  if item_workspace == "PRIVATE":
-                    private_match = item
+          if bot_id_manual:
+            # Si el dev puso el ID directamente lo usamos sin buscar
+            bot_id = bot_id_manual
+            print(f"[OK] Usando ID manual: {bot_id}")
+          else:
+            # Buscar por nombre en el repositorio
+            print(f"Buscando bot '{bot_name}' en AA...")
+            payload = json.dumps({
+              "filter": {
+                "operator": "substring",
+                "field": "name",
+                "value": bot_name
+              },
+              "fields": ["id", "name", "path", "workspaceType"],
+              "page": {"offset": 0, "length": 50}
+            }).encode("utf-8")
+            req = urllib.request.Request(
+              aa_url + "/v2/repository/file/list", data=payload, headers=hdrs
+            )
+            bot_id = ""
+            try:
+              with urllib.request.urlopen(req, context=ctx, timeout=30) as r:
+                items = json.loads(r.read().decode("utf-8")).get("list", [])
+                print(f"Bots encontrados con nombre '{bot_name}': {len(items)}")
+                for item in items:
+                  print(f"  ID: {item.get('id')} | Nombre: {item.get('name')} | Path: {item.get('path')} | Workspace: {item.get('workspaceType','?')}")
+
+                # Priorizar PRIVATE, si no tomar el exacto
+                for item in items:
+                  if item.get("name","").lower() == bot_name.lower() and item.get("workspaceType","") == "PRIVATE":
+                    bot_id = str(item.get("id",""))
+                    print(f"[OK] Bot PRIVADO encontrado: {item.get('name')} | ID: {bot_id}")
                     break
-                  elif any_match is None:
-                    any_match = item
+                if not bot_id:
+                  for item in items:
+                    if item.get("name","").lower() == bot_name.lower():
+                      bot_id = str(item.get("id",""))
+                      print(f"[OK] Bot encontrado: {item.get('name')} | ID: {bot_id}")
+                      break
+            except urllib.error.HTTPError as e:
+              body = e.read().decode("utf-8")
+              print(f"ERROR HTTP {e.code}: {body[:300]}")
+              sys.exit(1)
+            except Exception as e:
+              print(f"ERROR buscando bot: {e}")
+              sys.exit(1)
 
-              chosen = private_match or any_match
-              if chosen:
-                bot_id = str(chosen.get("id", ""))
-                print(f"[OK] Bot seleccionado: {chosen.get('name')} | ID: {bot_id} | Workspace: {chosen.get('workspaceType','')}")
-              
-          except urllib.error.HTTPError as e:
-            body = e.read().decode("utf-8")
-            print(f"ERROR HTTP {e.code} buscando bot: {body[:300]}")
-            sys.exit(1)
-          except Exception as e:
-            print(f"ERROR buscando bot: {e}")
-            sys.exit(1)
-
-          if not bot_id:
-            print(f"ERROR: Bot '{bot_name}' no encontrado")
-            print(f"  Verifica que el nombre sea exacto como aparece en AA")
-            sys.exit(1)
+            if not bot_id:
+              print(f"ERROR: Bot '{bot_name}' no encontrado")
+              print(f"  Tip: Puedes poner el ID directamente en el campo 'bot_id_manual'")
+              print(f"  El ID lo ves en la URL al editar el bot en AA")
+              sys.exit(1)
 
           # -- EXPORTAR BOT (flujo asincrono BLM de AA) --
           import time, zipfile, shutil
