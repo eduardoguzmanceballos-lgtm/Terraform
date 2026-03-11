@@ -789,23 +789,52 @@ jobs:
 
           hdrs = {"Content-Type": "application/json", "X-Authorization": token}
 
-          # Check-in a Publica
-          payload = json.dumps({
-            "fileId": bot_id,
-            "comment": "Auto check-in via DevSecOps pipeline - aprobado por lider tecnico"
-          }).encode("utf-8")
-          req = urllib.request.Request(
-            aa_url + "/v2/repository/file/checkin",
-            data=payload, headers=hdrs
-          )
-          try:
-            with urllib.request.urlopen(req, context=ctx, timeout=30) as r:
-              print(f"[OK] Check-in exitoso: {bot_name} -> Publica")
-          except urllib.error.HTTPError as e:
-            body = e.read().decode("utf-8")
-            print(f"[ERROR] HTTP {e.code}: {body[:200]}")
-            sys.exit(1)
-          except Exception as e:
-            print(f"[ERROR] {e}")
+          # Check-in a Publica - probamos multiples endpoints
+          # AA 360 puede usar distintos formatos segun la version
+          checkin_endpoints = [
+            {
+              "url": aa_url + "/v2/repository/file/checkin",
+              "payload": json.dumps({
+                "fileId": int(bot_id),
+                "comment": "Auto check-in via DevSecOps pipeline - aprobado por lider tecnico"
+              }).encode("utf-8")
+            },
+            {
+              "url": aa_url + f"/v2/repository/file/{bot_id}/checkin",
+              "payload": json.dumps({
+                "comment": "Auto check-in via DevSecOps pipeline - aprobado por lider tecnico"
+              }).encode("utf-8")
+            },
+            {
+              "url": aa_url + "/v2/repository/files/checkin",
+              "payload": json.dumps({
+                "fileIds": [int(bot_id)],
+                "comment": "Auto check-in via DevSecOps pipeline - aprobado por lider tecnico"
+              }).encode("utf-8")
+            },
+          ]
+
+          checkin_ok = False
+          for ep in checkin_endpoints:
+            try:
+              req = urllib.request.Request(
+                ep["url"], data=ep["payload"], headers=hdrs
+              )
+              with urllib.request.urlopen(req, context=ctx, timeout=30) as r:
+                resp = r.read().decode("utf-8")
+                print(f"[OK] Check-in exitoso en: {ep['url']}")
+                print(f"     Respuesta: {resp[:200]}")
+                checkin_ok = True
+                break
+            except urllib.error.HTTPError as e:
+              body = e.read().decode("utf-8")
+              print(f"HTTP {e.code} en {ep['url']}: {body[:200]}")
+              continue
+            except Exception as e:
+              print(f"ERROR en {ep['url']}: {e}")
+              continue
+
+          if not checkin_ok:
+            print(f"[ERROR] No se pudo hacer check-in con ninguno de los endpoints")
             sys.exit(1)
           PYEOF
