@@ -51,9 +51,12 @@ jobs:
     name: '1. Exportar bot desde AA Privada'
     runs-on: ubuntu-latest
     outputs:
-      bot_id:       ${{ steps.buscar_bot.outputs.bot_id }}
-      bot_nombre:   ${{ steps.buscar_bot.outputs.bot_nombre }}
-      bot_carpeta:  ${{ steps.buscar_bot.outputs.bot_carpeta }}
+      bot_id:        ${{ steps.buscar_bot.outputs.bot_id }}
+      bot_nombre:    ${{ steps.buscar_bot.outputs.bot_nombre }}
+      bot_carpeta:   ${{ steps.buscar_bot.outputs.bot_carpeta }}
+      total_critical: ${{ steps.code_analysis.outputs.total_critical }}
+      total_high:     ${{ steps.code_analysis.outputs.total_high }}
+      total_low:      ${{ steps.code_analysis.outputs.total_low }}
 
     steps:
       - name: Buscar y exportar bot desde AA
@@ -298,33 +301,9 @@ jobs:
             f.write(f"bot_carpeta={bot_folder}\n")
           PYEOF
 
-      - name: Subir bot exportado como artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: bot-exportado
-          path: /tmp/bots/
-          retention-days: 1
-
-# =================================================================
-# JOB 2: ANALIZAR BOT
-# =================================================================
-  analizar_bot:
-    name: '2. Analizar bot'
-    runs-on: ubuntu-latest
-    needs: exportar_bot
-    outputs:
-      total_critical: ${{ steps.code_analysis.outputs.total_critical }}
-      total_high:     ${{ steps.code_analysis.outputs.total_high }}
-      total_low:      ${{ steps.code_analysis.outputs.total_low }}
-      reporte_html:   ${{ steps.generar_reporte.outputs.reporte_html }}
-
-    steps:
-      - name: Descargar bot exportado
-        uses: actions/download-artifact@v4
-        with:
-          name: bot-exportado
-          path: /tmp/bots/
-
+      # -----------------------------------------------------------------
+      # ANALISIS DEL BOT (mismo job que export, sin artifact intermedio)
+      # -----------------------------------------------------------------
       - name: Validar sintaxis JSON
         run: |
           set +e
@@ -422,8 +401,8 @@ jobs:
           AA_USERNAME:      ${{ secrets.AA_USERNAME }}
           AA_API_KEY:       ${{ secrets.AA_API_KEY }}
           AA_AUTH_ENDPOINT: ${{ secrets.AA_AUTH_ENDPOINT }}
-          BOT_ID:           ${{ needs.exportar_bot.outputs.bot_id }}
-          BOT_NOMBRE:       ${{ needs.exportar_bot.outputs.bot_nombre }}
+          BOT_ID:           ${{ steps.buscar_bot.outputs.bot_id }}
+          BOT_NOMBRE:       ${{ steps.buscar_bot.outputs.bot_nombre }}
         run: |
           python3 - << 'PYEOF'
           import json, urllib.request, ssl, os, sys
@@ -514,8 +493,8 @@ jobs:
       - name: Generar reporte HTML
         id: generar_reporte
         env:
-          BOT_NOMBRE:  ${{ needs.exportar_bot.outputs.bot_nombre }}
-          BOT_CARPETA: ${{ needs.exportar_bot.outputs.bot_carpeta }}
+          BOT_NOMBRE:  ${{ steps.buscar_bot.outputs.bot_nombre }}
+          BOT_CARPETA: ${{ steps.buscar_bot.outputs.bot_carpeta }}
           RUN_ID:      ${{ github.run_id }}
           REPO:        ${{ github.repository }}
         run: |
@@ -635,14 +614,18 @@ jobs:
           retention-days: 7
 
 # =================================================================
-# JOB 3: NOTIFICAR AL LIDER POR CORREO
+# JOB 3: NOTIFICAR AL LIDER Y DECIDIR SI PASA A PUBLICA
+# - Sin violations Critical/High -> pasa automatico a Publica
+# - Con violations Critical/High -> se queda en Privada
+# El reporte HTML completo llega al correo del lider
+# Para agregar mas destinatarios separar con coma en MAIL_TO:
+#   MAIL_TO = "lider@empresa.com,otro@empresa.com"
 # =================================================================
   notificar_lider:
     name: '3. Notificar al lider por correo'
     runs-on: ubuntu-latest
     needs:
       - exportar_bot
-      - analizar_bot
 
     steps:
       - name: Descargar reporte HTML
@@ -651,18 +634,17 @@ jobs:
           name: reporte-html
           path: /tmp/reports/
 
-      - name: Enviar correo al lider
+      - name: Enviar reporte completo al lider
         env:
-          MAIL_USERNAME: ${{ secrets.MAIL_USERNAME }}
-          MAIL_PASSWORD: ${{ secrets.MAIL_PASSWORD }}
-          MAIL_TO:       ${{ secrets.MAIL_TO }}
-          BOT_NOMBRE:    ${{ needs.exportar_bot.outputs.bot_nombre }}
-          TOTAL_CRITICAL: ${{ needs.analizar_bot.outputs.total_critical }}
-          TOTAL_HIGH:     ${{ needs.analizar_bot.outputs.total_high }}
+          MAIL_USERNAME:  ${{ secrets.MAIL_USERNAME }}
+          MAIL_PASSWORD:  ${{ secrets.MAIL_PASSWORD }}
+          MAIL_TO:        ${{ secrets.MAIL_TO }}
+          BOT_NOMBRE:     ${{ needs.exportar_bot.outputs.bot_nombre }}
+          TOTAL_CRITICAL: ${{ needs.exportar_bot.outputs.total_critical }}
+          TOTAL_HIGH:     ${{ needs.exportar_bot.outputs.total_high }}
           RUN_ID:         ${{ github.run_id }}
           REPO:           ${{ github.repository }}
         run: |
-          pip install secure-smtplib --break-system-packages 2>/dev/null || true
           python3 - << 'PYEOF'
           import smtplib, os
           from email.mime.multipart import MIMEMultipart
@@ -670,87 +652,84 @@ jobs:
 
           mail_from = os.environ["MAIL_USERNAME"]
           mail_pass = os.environ["MAIL_PASSWORD"]
-          mail_to   = os.environ["MAIL_TO"]
+          # Soporta multiples destinatarios separados por coma
+          mail_to_raw = os.environ["MAIL_TO"]
+          mail_to_list = [m.strip() for m in mail_to_raw.split(",")]
           bot_name  = os.environ["BOT_NOMBRE"]
           critical  = int(os.environ.get("TOTAL_CRITICAL", 0))
           high      = int(os.environ.get("TOTAL_HIGH", 0))
           run_id    = os.environ["RUN_ID"]
           repo      = os.environ["REPO"]
+          url       = f"https://github.com/{repo}/actions/runs/{run_id}"
 
-          url = f"https://github.com/{repo}/actions/runs/{run_id}"
+          # Leer el reporte HTML generado por el Job 2
+          reporte_html = ""
+          if os.path.exists("/tmp/reports/reporte_final.html"):
+            with open("/tmp/reports/reporte_final.html", "r") as f:
+              reporte_html = f.read()
 
           if critical == 0 and high == 0:
-            estado = "APROBADO AUTOMATICAMENTE - Sin violations criticas"
-            color  = "#28a745"
+            estado   = "APROBADO - Bot pasara automaticamente a carpeta Publica"
+            color    = "#28a745"
+            emoji    = "[OK]"
+            accion   = "El bot fue aprobado y pasara a Publica automaticamente."
           else:
-            estado = f"REQUIERE APROBACION - {critical} Critical / {high} High"
-            color  = "#dc3545"
+            estado   = f"BLOQUEADO - {critical} Critical / {high} High violations encontradas"
+            color    = "#dc3545"
+            emoji    = "[ERROR]"
+            accion   = f"El bot NO paso a Publica. Tiene {critical} violation(es) Critical y {high} High."
 
-          html_body = f"""
-          <html><body style="font-family:Arial,sans-serif;margin:20px">
-            <h2 style="color:#0078d4">Bot listo para revision - {bot_name}</h2>
-            <p>El pipeline de DevSecOps ha analizado el bot <strong>{bot_name}</strong>
-               y necesita tu aprobacion.</p>
-            <div style="padding:15px;border-radius:8px;background:{color}22;
-                        border:2px solid {color};color:{color};
-                        font-weight:bold;text-align:center;margin:20px 0">
-              {estado}
-            </div>
-            <p>Por favor revisa el reporte completo y aprueba o rechaza en GitHub Actions:</p>
-            <a href="{url}" style="background:#0078d4;color:white;padding:12px 24px;
-               text-decoration:none;border-radius:5px;display:inline-block">
-              Ir a aprobar en GitHub
-            </a>
-            <br><br>
-            <p style="color:gray;font-size:12px">
-              Generado automaticamente - DevSecOps AA Pipeline
-            </p>
-          </body></html>
-          """
+          # Si hay reporte HTML lo usamos como cuerpo
+          # Si no, generamos uno simple
+          if reporte_html:
+            body_html = reporte_html
+          else:
+            body_html = f"""
+            <html><body style="font-family:Arial,sans-serif;margin:20px">
+              <h2 style="color:#0078d4">{emoji} Resultado DevSecOps - {bot_name}</h2>
+              <div style="padding:15px;border-radius:8px;background:{color}22;
+                          border:2px solid {color};color:{color};
+                          font-weight:bold;text-align:center;margin:20px 0">
+                {estado}
+              </div>
+              <p>{accion}</p>
+              <a href="{url}" style="background:#0078d4;color:white;padding:12px 24px;
+                 text-decoration:none;border-radius:5px;display:inline-block">
+                Ver detalle en GitHub Actions
+              </a>
+            </body></html>"""
+
+          subject = f"[DevSecOps AA] {emoji} Bot '{bot_name}' - {estado}"
 
           msg = MIMEMultipart("alternative")
-          msg["Subject"] = f"[DevSecOps AA] Bot '{bot_name}' requiere aprobacion"
+          msg["Subject"] = subject
           msg["From"]    = mail_from
-          msg["To"]      = mail_to
-          msg.attach(MIMEText(html_body, "html"))
+          msg["To"]      = ", ".join(mail_to_list)
+          msg.attach(MIMEText(body_html, "html"))
 
           try:
             with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
               server.login(mail_from, mail_pass)
-              server.sendmail(mail_from, mail_to, msg.as_string())
-              print(f"Correo enviado a: {mail_to}")
+              server.sendmail(mail_from, mail_to_list, msg.as_string())
+              print(f"Correo enviado a: {mail_to_list}")
           except Exception as e:
             print(f"ERROR enviando correo: {e}")
           PYEOF
 
 # =================================================================
-# JOB 4: APROBACION MANUAL DEL LIDER
-# Requiere configurar en GitHub:
-# Settings -> Environments -> "aprobacion-bots-aa"
-# -> Required reviewers -> agregar al lider tecnico
-# =================================================================
-  aprobacion_manual:
-    name: '4. Aprobacion manual del lider'
-    runs-on: ubuntu-latest
-    needs:
-      - notificar_lider
-    environment: aprobacion-bots-aa   # <- lider aprueba aqui en GitHub
-    steps:
-      - name: Aprobacion recibida
-        run: |
-          echo "Aprobacion recibida del lider tecnico"
-          echo "Bot autorizado para pasar a carpeta Publica en AA"
-
-# =================================================================
-# JOB 5: CHECK-IN A PUBLICA EN AA
-# Solo corre despues de que el lider aprueba
+# JOB 4: CHECK-IN A PUBLICA EN AA
+# Solo corre si NO hay violations Critical ni High
+# Si hay violations el bot se queda en Privada y el correo
+# ya notificó al lider con el detalle de los problemas
 # =================================================================
   publicar_bot:
-    name: '5. Check-in a Publica en AA'
+    name: '4. Check-in a Publica en AA'
     runs-on: ubuntu-latest
     needs:
       - exportar_bot
-      - aprobacion_manual
+      - notificar_lider
+    # Solo pasa a Publica si no hay violations Critical ni High
+    if: ${{ needs.exportar_bot.outputs.total_critical == '0' && needs.exportar_bot.outputs.total_high == '0' }}
 
     steps:
       - name: Check-in del bot a carpeta Publica
@@ -759,8 +738,8 @@ jobs:
           AA_USERNAME:      ${{ secrets.AA_USERNAME }}
           AA_API_KEY:       ${{ secrets.AA_API_KEY }}
           AA_AUTH_ENDPOINT: ${{ secrets.AA_AUTH_ENDPOINT }}
-          BOT_ID:           ${{ needs.exportar_bot.outputs.bot_id }}
-          BOT_NOMBRE:       ${{ needs.exportar_bot.outputs.bot_nombre }}
+          BOT_ID:           ${{ steps.buscar_bot.outputs.bot_id }}
+          BOT_NOMBRE:       ${{ steps.buscar_bot.outputs.bot_nombre }}
         run: |
           python3 - << 'PYEOF'
           import json, urllib.request, ssl, os, sys
