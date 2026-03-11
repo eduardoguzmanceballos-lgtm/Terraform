@@ -395,18 +395,47 @@ jobs:
 
           if [ -f "$BOT_FILE" ]; then
             FILE_WARNED=0
-            for pattern in "${PATTERNS[@]}"; do
-              MATCHES=$(grep -n "$pattern" "$BOT_FILE" 2>/dev/null                 | grep -v '"expression"'                 | grep -v '"variableName"'                 | grep -v '"lockerName"'                 | grep -v '"name"' | head -3)
-              if [ -n "$MATCHES" ]; then
-                if [ "$FILE_WARNED" -eq 0 ]; then
-                  echo "[ERROR] Credencial expuesta en: $(basename $BOT_FILE)"
-                  FILE_WARNED=1
-                fi
-                echo "   Patron detectado: '$pattern'"
-                echo "   Lineas: $MATCHES"
+
+            # Deteccion 1: variable con nombre sensible que tiene valor hardcodeado
+            # Busca: nombre de variable sensible aparece cerca de un string hardcodeado
+            SENSITIVE_VARS=("password" "passwd" "secret" "api_key" "apikey" "token" "connectionstring")
+            for var in "${SENSITIVE_VARS[@]}"; do
+              # Buscar si existe una variable con ese nombre asignada a un string literal
+              if python3 -c "
+import json, sys
+try:
+  data = open('$BOT_FILE').read()
+  # Buscar patron: variableName con nombre sensible Y cerca hay un string value
+  import re
+  # Patron AA 360: variable sensible asignada con valor string directo
+  pattern = r'"variableName"\s*:\s*"[^"]*${var}[^"]*"'
+  matches = re.findall(pattern, data, re.IGNORECASE)
+  if matches:
+    print(f'FOUND: {matches[0]}')
+    sys.exit(1)
+  sys.exit(0)
+except: sys.exit(0)
+" 2>/dev/null; then
+                : # no encontrado
+              else
+                echo "[ERROR] Variable con nombre sensible encontrada: '\$var'"
+                FILE_WARNED=1
                 VIOLATIONS=$((VIOLATIONS + 1))
               fi
             done
+
+            # Deteccion 2: strings hardcodeados con patrones de credenciales
+            HARDCODED_PATTERNS=("jdbc:" "mongodb://" "postgresql://" "mysql://" "Bearer " "Basic " "password=" "pwd=")
+            for pattern in "${HARDCODED_PATTERNS[@]}"; do
+              MATCHES=$(grep -n "$pattern" "$BOT_FILE" 2>/dev/null                 | grep -v '"expression"'                 | grep -v '"lockerName"' | head -3)
+              if [ -n "$MATCHES" ]; then
+                echo "[ERROR] String con credencial hardcodeada: '$pattern'"
+                echo "   $MATCHES"
+                FILE_WARNED=1
+                VIOLATIONS=$((VIOLATIONS + 1))
+              fi
+            done
+
             [ "$FILE_WARNED" -eq 0 ] && echo "[OK] Sin credenciales expuestas: $(basename $BOT_FILE)"
           else
             echo "[WARN] No se encontro archivo de bot para analizar"
