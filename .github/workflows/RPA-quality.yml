@@ -161,6 +161,7 @@ jobs:
           # Nota: fileIds debe ser lista de enteros, no strings
           print("Iniciando exportacion asincrona BLM...")
           payload = json.dumps({
+            "name": bot_name,
             "fileIds": [int(bot_id)],
             "includePackages": True,
             "includeTableValues": True
