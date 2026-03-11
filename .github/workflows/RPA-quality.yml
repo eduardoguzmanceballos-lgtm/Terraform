@@ -332,12 +332,21 @@ jobs:
           echo "  VALIDACION DE SINTAXIS JSON"
           echo "=============================="
           ERRORS=0
-          for file in /tmp/bots/*; do
+          # Buscar archivos del bot en la carpeta extraida
+          # Los bots de AA pueden tener extension .json, .bot, .taskbot
+          BOT_FILES=$(find /tmp/bots/extracted/ -type f 2>/dev/null)
+          if [ -z "$BOT_FILES" ]; then
+            echo "[WARN] No se encontraron archivos en extracted, revisando /tmp/bots/"
+            BOT_FILES=$(find /tmp/bots/ -type f -not -name "*.zip" 2>/dev/null)
+          fi
+
+          for file in $BOT_FILES; do
             [ -f "$file" ] || continue
+            echo "Validando: $(basename $file)"
             if python3 -c "import json; json.load(open('$file'))" 2>/dev/null; then
-              echo "[OK] Sintaxis valida: $(basename $file)"
+              echo "[OK] Sintaxis JSON valida: $(basename $file)"
             else
-              echo "[ERROR] Sintaxis invalida: $(basename $file)"
+              echo "[ERROR] Sintaxis invalida (puede ser formato binario): $(basename $file)"
               ERRORS=$((ERRORS + 1))
             fi
           done
@@ -357,7 +366,9 @@ jobs:
           PATTERNS=("password" "Password" "passwd" "secret" "api_key" "apikey"
                     "connectionstring" "ConnectionString" "Bearer " "Basic " "jdbc:" "mongodb://")
 
-          for file in /tmp/bots/*; do
+          BOT_FILES=$(find /tmp/bots/extracted/ -type f 2>/dev/null)
+          [ -z "$BOT_FILES" ] && BOT_FILES=$(find /tmp/bots/ -type f -not -name "*.zip" 2>/dev/null)
+          for file in $BOT_FILES; do
             [ -f "$file" ] || continue
             FILE_WARNED=0
             for pattern in "${PATTERNS[@]}"; do
@@ -386,7 +397,9 @@ jobs:
           echo "=============================="
           echo "  BUENAS PRACTICAS"
           echo "=============================="
-          for file in /tmp/bots/*; do
+          BOT_FILES=$(find /tmp/bots/extracted/ -type f 2>/dev/null)
+          [ -z "$BOT_FILES" ] && BOT_FILES=$(find /tmp/bots/ -type f -not -name "*.zip" 2>/dev/null)
+          for file in $BOT_FILES; do
             [ -f "$file" ] || continue
             echo "Bot: $(basename $file)"
             grep -q '"commandName":"try"' "$file" \
