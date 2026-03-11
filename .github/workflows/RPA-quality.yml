@@ -92,12 +92,18 @@ jobs:
 
           hdrs = {"Content-Type": "application/json", "X-Authorization": token}
 
-          # -- Buscar bot por nombre y carpeta --
-          search_term = bot_name[-10:] if len(bot_name) > 10 else bot_name
+          # -- Buscar bot por nombre EXACTO y carpeta --
+          # Busca por nombre exacto para evitar tomar el bot equivocado
           payload = json.dumps({
-            "filter": {"operator": "substring", "field": "name", "value": search_term},
+            "filter": {
+              "operator": "and",
+              "operands": [
+                {"operator": "eq", "field": "name", "value": bot_name},
+                {"operator": "substring", "field": "path", "value": bot_folder}
+              ]
+            },
             "fields": ["id", "name", "path"],
-            "page": {"offset": 0, "length": 50}
+            "page": {"offset": 0, "length": 10}
           }).encode("utf-8")
           req = urllib.request.Request(
             aa_url + "/v2/repository/file/list", data=payload, headers=hdrs
@@ -106,32 +112,50 @@ jobs:
           try:
             with urllib.request.urlopen(req, context=ctx, timeout=30) as r:
               items = json.loads(r.read().decode("utf-8")).get("list", [])
+              print(f"Bots encontrados con ese nombre y carpeta: {len(items)}")
               for item in items:
-                if bot_name.lower() in item.get("name", "").lower():
-                  bot_id = item.get("id", "")
-                  print(f"Bot encontrado: {item.get('name')} | ID: {bot_id}")
+                item_name = item.get("name", "")
+                item_path = item.get("path", "")
+                print(f"  -> {item_name} | path: {item_path}")
+                # Coincidencia exacta de nombre
+                if item_name.lower() == bot_name.lower():
+                  bot_id = str(item.get("id", ""))
+                  print(f"Bot exacto encontrado: {item_name} | ID: {bot_id} | Path: {item_path}")
                   break
           except Exception as e:
             print(f"ERROR buscando bot: {e}")
             sys.exit(1)
 
           if not bot_id:
-            print(f"ERROR: Bot '{bot_name}' no encontrado en AA Privada")
+            print(f"ERROR: Bot '{bot_name}' no encontrado en carpeta '{bot_folder}'")
+            print("Verifica que el nombre y carpeta sean exactos como aparecen en AA")
             sys.exit(1)
 
-          # -- EXPORTAR BOT (flujo asincrono de AA) --
-          # PASO 1: Crear solicitud de exportacion
-          # AA no exporta directo, primero crea una solicitud y da un requestId
+          # -- EXPORTAR BOT (flujo asincrono BLM de AA) --
           import time, zipfile, shutil
-          print("Iniciando exportacion asincrona...")
-          payload = json.dumps({"fileIds": [bot_id], "includePackages": False}).encode("utf-8")
-          req = urllib.request.Request(aa_url + "/v2/blm/export", data=payload, headers=hdrs)
+
+          # PASO 1: Crear solicitud de exportacion
+          # Nota: fileIds debe ser lista de enteros, no strings
+          print("Iniciando exportacion asincrona BLM...")
+          payload = json.dumps({
+            "fileIds": [int(bot_id)],
+            "includePackages": True,
+            "includeTableValues": True
+          }).encode("utf-8")
+          req = urllib.request.Request(
+            aa_url + "/v2/blm/export",
+            data=payload, headers=hdrs
+          )
           request_id = ""
           try:
             with urllib.request.urlopen(req, context=ctx, timeout=30) as r:
               resp = json.loads(r.read().decode("utf-8"))
               request_id = resp.get("requestId", "")
               print(f"Solicitud creada | requestId: {request_id}")
+          except urllib.error.HTTPError as e:
+            body = e.read().decode("utf-8")
+            print(f"ERROR HTTP {e.code} creando solicitud: {body[:300]}")
+            sys.exit(1)
           except Exception as e:
             print(f"ERROR creando solicitud: {e}")
             sys.exit(1)
@@ -140,11 +164,11 @@ jobs:
             print("ERROR: No se obtuvo requestId")
             sys.exit(1)
 
-          # PASO 2: Esperar a que AA procese la exportacion
-          # AA necesita unos segundos para preparar el archivo
+          # PASO 2: Verificar estado hasta que sea COMPLETED
+          # AA tarda unos segundos en preparar el paquete
           status = ""
           for intento in range(20):
-            time.sleep(3)
+            time.sleep(4)
             req = urllib.request.Request(
               aa_url + f"/v2/blm/export/{request_id}",
               headers=hdrs, method="GET"
@@ -154,20 +178,20 @@ jobs:
                 resp = json.loads(r.read().decode("utf-8"))
                 status = resp.get("status", "")
                 print(f"Intento {intento+1}/20 | Estado: {status}")
-                if status == "SUCCESS":
+                if status == "COMPLETED":
                   break
                 elif status in ["FAILED", "ERROR"]:
-                  print(f"ERROR: Exportacion fallida: {status}")
+                  print(f"ERROR: Exportacion fallida con estado: {status}")
                   sys.exit(1)
             except Exception as e:
               print(f"ERROR verificando estado: {e}")
 
-          if status != "SUCCESS":
+          if status != "COMPLETED":
             print(f"ERROR: Tiempo agotado. Estado final: {status}")
             sys.exit(1)
 
-          # PASO 3: Descargar el zip con el bot
-          print("Descargando archivo exportado...")
+          # PASO 3: Descargar el zip del bot
+          print("Descargando paquete exportado...")
           req = urllib.request.Request(
             aa_url + f"/v2/blm/export/{request_id}/file",
             headers=hdrs, method="GET"
@@ -179,17 +203,18 @@ jobs:
               zip_path = f"/tmp/bots/{bot_name}.zip"
               open(zip_path, "wb").write(bot_content)
               print(f"Zip descargado: {len(bot_content)} bytes")
-              # Extraer el zip
+              # Extraer el zip para obtener el JSON del bot
               with zipfile.ZipFile(zip_path, "r") as z:
                 z.extractall("/tmp/bots/extracted/")
                 archivos = z.namelist()
                 print(f"Archivos en zip: {archivos}")
-              # Copiar el archivo del bot
-              if archivos:
-                shutil.copy(f"/tmp/bots/extracted/{archivos[0]}", f"/tmp/bots/{bot_name}")
-                print(f"Bot extraido correctamente")
+              # Buscar JSON del bot y copiarlo
+              json_files = [f for f in archivos if f.endswith(".json")]
+              src = json_files[0] if json_files else archivos[0]
+              shutil.copy(f"/tmp/bots/extracted/{src}", f"/tmp/bots/{bot_name}")
+              print(f"Bot extraido: {src}")
           except Exception as e:
-            print(f"ERROR descargando archivo: {e}")
+            print(f"ERROR descargando paquete: {e}")
             sys.exit(1)
 
           # -- Guardar token para jobs siguientes --
