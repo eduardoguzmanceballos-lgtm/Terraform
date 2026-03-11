@@ -790,42 +790,33 @@ jobs:
           hdrs = {"Content-Type": "application/json", "X-Authorization": token}
 
           # Check-in de Privada a Publica en AA 360
-          # Basado en la URL del Control Room:
-          # /bots/repository/private/files/{fileId}/checkin
-          # La API sigue el mismo patron con workspaces
+          # Endpoint capturado del Network del navegador:
+          # PUT /v3/repository/checkin
+          # Payload: { "ids": ["fileId"], "comment": "..." }
           print(f"Haciendo check-in del bot ID {bot_id} a Publica...")
 
           checkin_payload = json.dumps({
-            "comment": "Auto check-in via DevSecOps pipeline - aprobado por lider tecnico",
-            "overWriteContent": True
+            "ids": [str(bot_id)],
+            "comment": "Auto check-in via DevSecOps pipeline - aprobado por lider tecnico"
           }).encode("utf-8")
 
-          checkin_endpoints = [
-            aa_url + f"/v2/repository/workspaces/private/files/{bot_id}/checkin",
-            aa_url + f"/v3/repository/workspaces/private/files/{bot_id}/checkin",
-            aa_url + f"/v2/repository/workspaces/public/files/{bot_id}/checkin",
-            aa_url + f"/v2/repository/file/{bot_id}/checkin",
-          ]
-
-          checkin_ok = False
-          for url in checkin_endpoints:
-            try:
-              req = urllib.request.Request(url, data=checkin_payload, headers=hdrs)
-              with urllib.request.urlopen(req, context=ctx, timeout=30) as r:
-                resp = r.read().decode("utf-8")
-                print(f"[OK] Check-in exitoso: {url}")
-                print(f"     Respuesta: {resp[:200]}")
-                checkin_ok = True
-                break
-            except urllib.error.HTTPError as e:
-              body_err = e.read().decode("utf-8")
-              print(f"HTTP {e.code} en {url}: {body_err[:150]}")
-              continue
-            except Exception as e:
-              print(f"ERROR en {url}: {e}")
-              continue
-
-          if not checkin_ok:
-            print("ERROR: No se pudo hacer check-in del bot")
+          # PUT en vez de POST
+          req = urllib.request.Request(
+            aa_url + "/v3/repository/checkin",
+            data=checkin_payload,
+            headers=hdrs,
+            method="PUT"
+          )
+          try:
+            with urllib.request.urlopen(req, context=ctx, timeout=30) as r:
+              resp = r.read().decode("utf-8")
+              print(f"[OK] Check-in exitoso -> Publica")
+              print(f"     Respuesta: {resp[:200]}")
+          except urllib.error.HTTPError as e:
+            body_err = e.read().decode("utf-8")
+            print(f"ERROR HTTP {e.code}: {body_err[:300]}")
+            sys.exit(1)
+          except Exception as e:
+            print(f"ERROR: {e}")
             sys.exit(1)
           PYEOF
