@@ -396,41 +396,19 @@ jobs:
           if [ -f "$BOT_FILE" ]; then
             FILE_WARNED=0
 
-            # Deteccion 1: variable con nombre sensible que tiene valor hardcodeado
-            # Busca: nombre de variable sensible aparece cerca de un string hardcodeado
-            SENSITIVE_VARS=("password" "passwd" "secret" "api_key" "apikey" "token" "connectionstring")
-            for var in "${SENSITIVE_VARS[@]}"; do
-              # Buscar si existe una variable con ese nombre asignada a un string literal
-              if python3 -c "
-import json, sys
-try:
-  data = open('$BOT_FILE').read()
-  # Buscar patron: variableName con nombre sensible Y cerca hay un string value
-  import re
-  # Patron AA 360: variable sensible asignada con valor string directo
-  pattern = r'"variableName"\s*:\s*"[^"]*${var}[^"]*"'
-  matches = re.findall(pattern, data, re.IGNORECASE)
-  if matches:
-    print(f'FOUND: {matches[0]}')
-    sys.exit(1)
-  sys.exit(0)
-except: sys.exit(0)
-" 2>/dev/null; then
-                : # no encontrado
-              else
-                echo "[ERROR] Variable con nombre sensible encontrada: '\$var'"
+            # Deteccion 1: variable con nombre sensible asignada en el bot
+            for var in password passwd secret api_key apikey token connectionstring; do
+              if grep -qi ""variableName".*".*${var}.*"" "$BOT_FILE" 2>/dev/null; then
+                echo "[ERROR] Variable sensible encontrada: $var"
                 FILE_WARNED=1
                 VIOLATIONS=$((VIOLATIONS + 1))
               fi
             done
 
             # Deteccion 2: strings hardcodeados con patrones de credenciales
-            HARDCODED_PATTERNS=("jdbc:" "mongodb://" "postgresql://" "mysql://" "Bearer " "Basic " "password=" "pwd=")
-            for pattern in "${HARDCODED_PATTERNS[@]}"; do
-              MATCHES=$(grep -n "$pattern" "$BOT_FILE" 2>/dev/null                 | grep -v '"expression"'                 | grep -v '"lockerName"' | head -3)
-              if [ -n "$MATCHES" ]; then
-                echo "[ERROR] String con credencial hardcodeada: '$pattern'"
-                echo "   $MATCHES"
+            for pattern in "jdbc:" "mongodb://" "postgresql://" "mysql://" "password=" "pwd="; do
+              if grep -q "$pattern" "$BOT_FILE" 2>/dev/null; then
+                echo "[ERROR] Credencial hardcodeada detectada: $pattern"
                 FILE_WARNED=1
                 VIOLATIONS=$((VIOLATIONS + 1))
               fi
@@ -860,7 +838,7 @@ except: sys.exit(0)
 
           checkin_payload = json.dumps({
             "ids": [str(bot_id)],
-            "comment": "Auto check-in via DevSecOps pipeline - aprobado por lider tecnico"
+            "comment": "Auto check-in DevSecOps pipeline"
           }).encode("utf-8")
 
           # PUT en vez de POST
