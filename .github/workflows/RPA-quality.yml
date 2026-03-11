@@ -163,8 +163,8 @@ jobs:
           payload = json.dumps({
             "name": bot_name,
             "fileIds": [int(bot_id)],
-            "includePackages": True,
-            "includeTableValues": True
+            "includePackages": False,
+            "includeTableValues": False
           }).encode("utf-8")
           req = urllib.request.Request(
             aa_url + "/v2/blm/export",
@@ -188,58 +188,98 @@ jobs:
             print("ERROR: No se obtuvo requestId")
             sys.exit(1)
 
-          # PASO 2: Verificar estado hasta que sea COMPLETED
-          # AA tarda unos segundos en preparar el paquete
+          # PASO 2: Verificar estado y obtener downloadFileId
+          # AA procesa la exportacion y devuelve un downloadFileId
           status = ""
+          download_file_id = ""
           for intento in range(20):
             time.sleep(4)
-            req = urllib.request.Request(
-              aa_url + f"/v2/blm/export/{request_id}",
-              headers=hdrs, method="GET"
-            )
-            try:
-              with urllib.request.urlopen(req, context=ctx, timeout=30) as r:
-                resp = json.loads(r.read().decode("utf-8"))
-                status = resp.get("status", "")
-                print(f"Intento {intento+1}/20 | Estado: {status}")
-                if status == "COMPLETED":
+            # Intentar ambos formatos de endpoint que usa AA 360
+            endpoints_status = [
+              f"/v2/blm/export/{request_id}",
+              f"/v2/blm/status/{request_id}",
+            ]
+            for ep in endpoints_status:
+              try:
+                req = urllib.request.Request(
+                  aa_url + ep, headers=hdrs, method="GET"
+                )
+                with urllib.request.urlopen(req, context=ctx, timeout=30) as r:
+                  resp = json.loads(r.read().decode("utf-8"))
+                  status = resp.get("status", "")
+                  download_file_id = str(resp.get("downloadFileId", ""))
+                  print(f"Intento {intento+1}/20 | Estado: {status} | downloadFileId: {download_file_id}")
                   break
-                elif status in ["FAILED", "ERROR"]:
-                  print(f"ERROR: Exportacion fallida con estado: {status}")
-                  sys.exit(1)
-            except Exception as e:
-              print(f"ERROR verificando estado: {e}")
+              except urllib.error.HTTPError as e:
+                if e.code == 404:
+                  continue  # probar el siguiente endpoint
+                body = e.read().decode("utf-8")
+                print(f"HTTP {e.code} en {ep}: {body[:100]}")
+              except Exception as e:
+                print(f"ERROR en {ep}: {e}")
+
+            if status == "COMPLETED":
+              break
+            elif status in ["FAILED", "ERROR"]:
+              print(f"ERROR: Exportacion fallida: {status}")
+              sys.exit(1)
 
           if status != "COMPLETED":
             print(f"ERROR: Tiempo agotado. Estado final: {status}")
             sys.exit(1)
 
-          # PASO 3: Descargar el zip del bot
-          print("Descargando paquete exportado...")
-          req = urllib.request.Request(
-            aa_url + f"/v2/blm/export/{request_id}/file",
-            headers=hdrs, method="GET"
-          )
-          try:
-            with urllib.request.urlopen(req, context=ctx, timeout=60) as r:
-              bot_content = r.read()
-              os.makedirs("/tmp/bots", exist_ok=True)
-              zip_path = f"/tmp/bots/{bot_name}.zip"
-              open(zip_path, "wb").write(bot_content)
-              print(f"Zip descargado: {len(bot_content)} bytes")
-              # Extraer el zip para obtener el JSON del bot
-              with zipfile.ZipFile(zip_path, "r") as z:
-                z.extractall("/tmp/bots/extracted/")
-                archivos = z.namelist()
-                print(f"Archivos en zip: {archivos}")
-              # Buscar JSON del bot y copiarlo
-              json_files = [f for f in archivos if f.endswith(".json")]
-              src = json_files[0] if json_files else archivos[0]
-              shutil.copy(f"/tmp/bots/extracted/{src}", f"/tmp/bots/{bot_name}")
-              print(f"Bot extraido: {src}")
-          except Exception as e:
-            print(f"ERROR descargando paquete: {e}")
+          if not download_file_id or download_file_id == "None":
+            print("WARN: No se obtuvo downloadFileId, usando requestId para descargar")
+            download_file_id = request_id
+
+          # PASO 3: Descargar el zip usando downloadFileId
+          print(f"Descargando paquete | downloadFileId: {download_file_id}...")
+          endpoints_download = [
+            f"/v2/blm/export/{download_file_id}/file",
+            f"/v2/blm/download/{download_file_id}",
+            f"/v2/blm/export/{request_id}/file",
+          ]
+          bot_content = None
+          for ep in endpoints_download:
+            try:
+              req = urllib.request.Request(
+                aa_url + ep, headers=hdrs, method="GET"
+              )
+              with urllib.request.urlopen(req, context=ctx, timeout=60) as r:
+                bot_content = r.read()
+                print(f"[OK] Descargado desde {ep} | {len(bot_content)} bytes")
+                break
+            except urllib.error.HTTPError as e:
+              print(f"HTTP {e.code} en {ep}")
+              continue
+            except Exception as e:
+              print(f"ERROR en {ep}: {e}")
+              continue
+
+          if not bot_content:
+            print("ERROR: No se pudo descargar el paquete del bot")
             sys.exit(1)
+
+          # Guardar y extraer el zip
+          os.makedirs("/tmp/bots", exist_ok=True)
+          zip_path = f"/tmp/bots/{bot_name}.zip"
+          open(zip_path, "wb").write(bot_content)
+          print(f"Zip guardado: {len(bot_content)} bytes")
+
+          try:
+            with zipfile.ZipFile(zip_path, "r") as z:
+              z.extractall("/tmp/bots/extracted/")
+              archivos = z.namelist()
+              print(f"Archivos en zip: {archivos}")
+            json_files = [f for f in archivos if f.endswith(".json")]
+            src = json_files[0] if json_files else archivos[0]
+            shutil.copy(f"/tmp/bots/extracted/{src}", f"/tmp/bots/{bot_name}")
+            print(f"[OK] Bot extraido: {src}")
+          except Exception as e:
+            print(f"WARN: No es zip o error extrayendo: {e}")
+            # Puede que sea directamente el archivo, no un zip
+            shutil.copy(zip_path, f"/tmp/bots/{bot_name}")
+            print(f"[OK] Archivo guardado directamente como: {bot_name}")
 
           # -- Guardar token para jobs siguientes --
           open("/tmp/aa_token.txt", "w").write(token)
