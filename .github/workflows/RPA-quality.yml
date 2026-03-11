@@ -160,8 +160,14 @@ jobs:
           # PASO 1: Crear solicitud de exportacion
           # Nota: fileIds debe ser lista de enteros, no strings
           print("Iniciando exportacion asincrona BLM...")
+          # El nombre del export debe ser unico en AA
+          # Agregamos timestamp para evitar conflictos con exports anteriores
+          from datetime import datetime
+          export_name = f"{bot_name}_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+          print(f"Nombre del export: {export_name}")
+
           payload = json.dumps({
-            "name": bot_name,
+            "name": export_name,
             "fileIds": [int(bot_id)],
             "includePackages": False,
             "includeTableValues": False
