@@ -1,89 +1,77 @@
 # =================================================================
 # PIPELINE DEVSECOPS - AUTOMATION ANYWHERE
-# GitHub Actions
+# GitHub Actions - v10 (multi-bot)
 #
 # Flujo:
 #   1. Dev ejecuta el pipeline manualmente
-#   2. Llena nombre del bot y carpeta en AA Privada
-#   3. Pipeline busca y exporta el bot desde AA via API
-#   4. Analiza el bot (sintaxis, credenciales, calidad, Code Analysis)
-#   5. Manda correo al lider con el reporte
-#   6. Lider aprueba o rechaza en GitHub
-#   7. Si aprueba -> pipeline hace check-in a Publica en AA
+#   2. Pone la carpeta y opcionalmente IDs separados por coma
+#   3. Pipeline descubre, exporta y analiza todos los bots
+#   4. Gate global: si uno falla, ninguno pasa
+#   5. Envia correo con tabla resumen de todos los bots
+#   6. Si todos pasan -> check-in de todos a Publica en un solo llamado
 #
-# SECRETS requeridos en GitHub (Settings -> Secrets -> Actions):
+# SECRETS requeridos:
 #   AA_URL            -> URL del Control Room
 #   AA_USERNAME       -> usuario de servicio
 #   AA_API_KEY        -> API key del usuario
 #   AA_AUTH_ENDPOINT  -> /v2/authentication
 #   MAIL_USERNAME     -> correo que envia (Gmail)
 #   MAIL_PASSWORD     -> app password del correo
-#   MAIL_TO           -> correo del lider tecnico
+#   MAIL_TO           -> correo(s) del lider, separados por coma
 # =================================================================
 
 name: AA DevSecOps Pipeline
 
-# -----------------------------------------------------------------
-# TRIGGER MANUAL: el dev ejecuta el pipeline y llena el formulario
-# -----------------------------------------------------------------
 on:
   workflow_dispatch:
     inputs:
-      bot_nombre:
-        description: 'Nombre del bot en AA (ej: Calidad)'
-        required: true
-        type: string
       bot_carpeta:
         description: 'Carpeta del bot en AA Privada (ej: Bots/DevSecOps)'
         required: true
         type: string
-      bot_id_manual:
-        description: 'ID del bot en AA (opcional - lo ves en la URL al editar el bot)'
+      bot_ids_manual:
+        description: 'IDs de bots separados por coma (opcional - si no se llena, procesa toda la carpeta)'
         required: false
         type: string
-        default: 
+        default: ''
 
 # =================================================================
-# JOB 1: BUSCAR Y EXPORTAR BOT DESDE AA PRIVADA
+# JOB 1: DESCUBRIR, EXPORTAR Y ANALIZAR TODOS LOS BOTS
 # =================================================================
 jobs:
-  exportar_bot:
-    name: '1. Exportar bot desde AA Privada'
+  analizar_bots:
+    name: '1. Descubrir, exportar y analizar bots'
     runs-on: ubuntu-latest
     outputs:
-      bot_id:               ${{ steps.buscar_bot.outputs.bot_id }}
-      bot_nombre:           ${{ steps.buscar_bot.outputs.bot_nombre }}
-      bot_carpeta:          ${{ steps.buscar_bot.outputs.bot_carpeta }}
-      total_critical:       ${{ steps.code_analysis.outputs.total_critical }}
-      total_high:           ${{ steps.code_analysis.outputs.total_high }}
-      total_low:            ${{ steps.code_analysis.outputs.total_low }}
-      credential_violations: ${{ steps.credential_scan.outputs.credential_violations }}
+      gate_ok:      ${{ steps.gate.outputs.gate_ok }}
+      bots_count:   ${{ steps.gate.outputs.bots_count }}
+      bots_fallidos: ${{ steps.gate.outputs.bots_fallidos }}
+      bot_ids_json: ${{ steps.gate.outputs.bot_ids_json }}
 
     steps:
-      - name: Buscar y exportar bot desde AA
-        id: buscar_bot
+      - name: Descubrir bots en AA
+        id: descubrir
         env:
           AA_URL:           ${{ secrets.AA_URL }}
           AA_USERNAME:      ${{ secrets.AA_USERNAME }}
           AA_API_KEY:       ${{ secrets.AA_API_KEY }}
           AA_AUTH_ENDPOINT: ${{ secrets.AA_AUTH_ENDPOINT }}
-          BOT_NOMBRE:       ${{ github.event.inputs.bot_nombre }}
           BOT_CARPETA:      ${{ github.event.inputs.bot_carpeta }}
-          BOT_ID_MANUAL:    ${{ github.event.inputs.bot_id_manual }}
+          BOT_IDS_MANUAL:   ${{ github.event.inputs.bot_ids_manual }}
         run: |
           python3 - << 'PYEOF'
           import json, urllib.request, ssl, os, sys
 
-          aa_url    = os.environ["AA_URL"]
-          username  = os.environ["AA_USERNAME"]
-          api_key   = os.environ["AA_API_KEY"]
-          endpoint  = os.environ.get("AA_AUTH_ENDPOINT", "/v2/authentication")
-          bot_name  = os.environ["BOT_NOMBRE"]
-          bot_folder= os.environ["BOT_CARPETA"]
+          aa_url     = os.environ["AA_URL"]
+          username   = os.environ["AA_USERNAME"]
+          api_key    = os.environ["AA_API_KEY"]
+          endpoint   = os.environ.get("AA_AUTH_ENDPOINT", "/v2/authentication")
+          bot_folder = os.environ["BOT_CARPETA"]
+          ids_manual = os.environ.get("BOT_IDS_MANUAL", "").strip()
 
           ctx = ssl.create_default_context()
 
-          # -- Login --
+          # Login
           payload = json.dumps({"username": username, "apiKey": api_key}).encode("utf-8")
           req = urllib.request.Request(
             aa_url + endpoint, data=payload,
@@ -93,531 +81,446 @@ jobs:
             with urllib.request.urlopen(req, context=ctx, timeout=30) as r:
               token = json.loads(r.read().decode("utf-8")).get("token", "")
             if not token:
-              print("ERROR: Token vacio")
-              sys.exit(1)
-            print(f"Login exitoso")
+              print("ERROR: Token vacio"); sys.exit(1)
+            print("Login exitoso")
           except Exception as e:
-            print(f"ERROR login: {e}")
-            sys.exit(1)
+            print(f"ERROR login: {e}"); sys.exit(1)
 
           hdrs = {"Content-Type": "application/json", "X-Authorization": token}
 
-          # -- Buscar bot: si viene ID manual lo usa directo, si no busca por nombre --
-          bot_id_manual = os.environ.get("BOT_ID_MANUAL", "").strip()
+          # Guardar token para steps siguientes
+          os.makedirs("/tmp/aa", exist_ok=True)
+          open("/tmp/aa/token.txt", "w").write(token)
 
-          if bot_id_manual:
-            bot_id = bot_id_manual
-            print(f"[OK] Usando ID manual: {bot_id}")
+          bots = []
+
+          if ids_manual:
+            # Modo IDs manuales: resolvemos nombre de cada ID via API
+            print(f"Modo IDs manuales: {ids_manual}")
+            ids = [i.strip() for i in ids_manual.split(",") if i.strip()]
+            for bot_id in ids:
+              try:
+                payload = json.dumps({
+                  "filter": {"operator": "eq", "field": "id", "value": bot_id},
+                  "fields": ["id", "name", "path"],
+                  "page": {"offset": 0, "length": 1}
+                }).encode("utf-8")
+                req = urllib.request.Request(
+                  aa_url + "/v2/repository/file/list", data=payload, headers=hdrs
+                )
+                with urllib.request.urlopen(req, context=ctx, timeout=30) as r:
+                  items = json.loads(r.read().decode("utf-8")).get("list", [])
+                  if items:
+                    item = items[0]
+                    bots.append({"id": str(item["id"]), "nombre": item["name"]})
+                    print(f"  [OK] ID {bot_id} -> {item['name']}")
+                  else:
+                    # Si no lo encuentra igual lo agrega con nombre desconocido
+                    bots.append({"id": bot_id, "nombre": f"Bot_{bot_id}"})
+                    print(f"  [WARN] ID {bot_id} no encontrado en repositorio, se usara igual")
+              except Exception as e:
+                print(f"  [WARN] Error buscando ID {bot_id}: {e}")
+                bots.append({"id": bot_id, "nombre": f"Bot_{bot_id}"})
           else:
-            print(f"Buscando bot '{bot_name}' en AA...")
-            payload = json.dumps({
-              "filter": {
-                "operator": "substring",
-                "field": "name",
-                "value": bot_name
-              },
-              "fields": ["id", "name", "path", "workspaceType"],
-              "page": {"offset": 0, "length": 50}
-            }).encode("utf-8")
-            req = urllib.request.Request(
-              aa_url + "/v2/repository/file/list", data=payload, headers=hdrs
-            )
-            bot_id = ""
+            # Modo carpeta: listar todos los bots de esa carpeta
+            print(f"Modo carpeta: buscando bots en '{bot_folder}'...")
             try:
+              payload = json.dumps({
+                "filter": {
+                  "operator": "and",
+                  "operands": [
+                    {"operator": "substring", "field": "path", "value": bot_folder},
+                    {"operator": "eq", "field": "workspaceType", "value": "PRIVATE"}
+                  ]
+                },
+                "fields": ["id", "name", "path", "workspaceType", "fileType"],
+                "page": {"offset": 0, "length": 100}
+              }).encode("utf-8")
+              req = urllib.request.Request(
+                aa_url + "/v2/repository/file/list", data=payload, headers=hdrs
+              )
               with urllib.request.urlopen(req, context=ctx, timeout=30) as r:
                 items = json.loads(r.read().decode("utf-8")).get("list", [])
-                print(f"Bots encontrados con nombre '{bot_name}': {len(items)}")
+                print(f"Items encontrados en carpeta: {len(items)}")
                 for item in items:
-                  print(f"  ID: {item.get('id')} | Nombre: {item.get('name')} | Path: {item.get('path')} | Workspace: {item.get('workspaceType','?')}")
-
-                for item in items:
-                  if item.get("name","").lower() == bot_name.lower() and item.get("workspaceType","") == "PRIVATE":
-                    bot_id = str(item.get("id",""))
-                    print(f"[OK] Bot PRIVADO encontrado: {item.get('name')} | ID: {bot_id}")
-                    break
-                if not bot_id:
-                  for item in items:
-                    if item.get("name","").lower() == bot_name.lower():
-                      bot_id = str(item.get("id",""))
-                      print(f"[OK] Bot encontrado: {item.get('name')} | ID: {bot_id}")
-                      break
+                  print(f"  ID: {item.get('id')} | Nombre: {item.get('name')} | Path: {item.get('path')} | Tipo: {item.get('fileType','?')}")
+                  # Incluir solo bots (taskbot), excluir carpetas y otros archivos
+                  file_type = item.get("fileType", "").lower()
+                  if "bot" in file_type or "task" in file_type or file_type == "":
+                    bots.append({"id": str(item["id"]), "nombre": item["name"]})
             except urllib.error.HTTPError as e:
               body = e.read().decode("utf-8")
               print(f"ERROR HTTP {e.code}: {body[:300]}")
-              sys.exit(1)
-            except Exception as e:
-              print(f"ERROR buscando bot: {e}")
-              sys.exit(1)
-
-            if not bot_id:
-              print(f"ERROR: Bot '{bot_name}' no encontrado")
-              print(f"  Tip: Puedes poner el ID directamente en el campo 'bot_id_manual'")
-              sys.exit(1)
-
-          # -- EXPORTAR BOT (flujo asincrono BLM de AA) --
-          import time, zipfile, shutil
-
-          print("Iniciando exportacion asincrona BLM...")
-          from datetime import datetime
-          export_name = f"{bot_name}_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
-          print(f"Nombre del export: {export_name}")
-
-          payload = json.dumps({
-            "name": export_name,
-            "fileIds": [int(bot_id)],
-            "includePackages": False,
-            "includeTableValues": False
-          }).encode("utf-8")
-          req = urllib.request.Request(
-            aa_url + "/v2/blm/export",
-            data=payload, headers=hdrs
-          )
-          request_id = ""
-          try:
-            with urllib.request.urlopen(req, context=ctx, timeout=30) as r:
-              resp = json.loads(r.read().decode("utf-8"))
-              request_id = resp.get("requestId", "")
-              print(f"Solicitud creada | requestId: {request_id}")
-          except urllib.error.HTTPError as e:
-            body = e.read().decode("utf-8")
-            print(f"ERROR HTTP {e.code} creando solicitud: {body[:300]}")
-            sys.exit(1)
-          except Exception as e:
-            print(f"ERROR creando solicitud: {e}")
-            sys.exit(1)
-
-          if not request_id:
-            print("ERROR: No se obtuvo requestId")
-            sys.exit(1)
-
-          status = ""
-          download_file_id = ""
-          for intento in range(20):
-            time.sleep(4)
-            endpoints_status = [
-              f"/v2/blm/export/{request_id}",
-              f"/v2/blm/status/{request_id}",
-            ]
-            for ep in endpoints_status:
+              # Fallback: buscar sin filtro de workspaceType (por si AA devuelve UNKNOWN)
+              print("Intentando sin filtro de workspaceType...")
               try:
+                payload = json.dumps({
+                  "filter": {"operator": "substring", "field": "path", "value": bot_folder},
+                  "fields": ["id", "name", "path", "workspaceType", "fileType"],
+                  "page": {"offset": 0, "length": 100}
+                }).encode("utf-8")
                 req = urllib.request.Request(
-                  aa_url + ep, headers=hdrs, method="GET"
+                  aa_url + "/v2/repository/file/list", data=payload, headers=hdrs
                 )
                 with urllib.request.urlopen(req, context=ctx, timeout=30) as r:
-                  resp = json.loads(r.read().decode("utf-8"))
-                  status = resp.get("status", "")
-                  download_file_id = str(resp.get("downloadFileId", ""))
-                  print(f"Intento {intento+1}/20 | Estado: {status} | downloadFileId: {download_file_id}")
-                  break
-              except urllib.error.HTTPError as e:
-                if e.code == 404:
-                  continue
-                body = e.read().decode("utf-8")
-                print(f"HTTP {e.code} en {ep}: {body[:100]}")
-              except Exception as e:
-                print(f"ERROR en {ep}: {e}")
-
-            if status == "COMPLETED":
-              break
-            elif status in ["FAILED", "ERROR"]:
-              print(f"ERROR: Exportacion fallida: {status}")
-              sys.exit(1)
-
-          if status != "COMPLETED":
-            print(f"ERROR: Tiempo agotado. Estado final: {status}")
-            sys.exit(1)
-
-          if not download_file_id or download_file_id == "None":
-            print("WARN: No se obtuvo downloadFileId, usando requestId")
-            download_file_id = request_id
-
-          print(f"Descargando paquete | downloadFileId: {download_file_id}...")
-          endpoints_download = [
-            f"/v2/blm/export/{download_file_id}/file",
-            f"/v2/blm/download/{download_file_id}",
-            f"/v2/blm/export/{request_id}/file",
-          ]
-          bot_content = None
-          for ep in endpoints_download:
-            try:
-              req = urllib.request.Request(
-                aa_url + ep, headers=hdrs, method="GET"
-              )
-              with urllib.request.urlopen(req, context=ctx, timeout=60) as r:
-                bot_content = r.read()
-                print(f"[OK] Descargado desde {ep} | {len(bot_content)} bytes")
-                break
-            except urllib.error.HTTPError as e:
-              print(f"HTTP {e.code} en {ep}")
-              continue
+                  items = json.loads(r.read().decode("utf-8")).get("list", [])
+                  print(f"Items encontrados (fallback): {len(items)}")
+                  for item in items:
+                    print(f"  ID: {item.get('id')} | Nombre: {item.get('name')} | Workspace: {item.get('workspaceType','?')}")
+                    bots.append({"id": str(item["id"]), "nombre": item["name"]})
+              except Exception as e2:
+                print(f"ERROR fallback: {e2}"); sys.exit(1)
             except Exception as e:
-              print(f"ERROR en {ep}: {e}")
-              continue
+              print(f"ERROR listando carpeta: {e}"); sys.exit(1)
 
-          if not bot_content:
-            print("ERROR: No se pudo descargar el paquete del bot")
+          if not bots:
+            print(f"ERROR: No se encontraron bots en '{bot_folder}'")
+            print("  Verifica que la carpeta existe y tiene bots en AA Privada")
             sys.exit(1)
 
-          os.makedirs("/tmp/bots", exist_ok=True)
-          zip_path = f"/tmp/bots/{bot_name}.zip"
-          open(zip_path, "wb").write(bot_content)
-          print(f"Zip guardado: {len(bot_content)} bytes")
+          print(f"\nBots a procesar: {len(bots)}")
+          for b in bots:
+            print(f"  -> {b['nombre']} (ID: {b['id']})")
 
-          try:
-            with zipfile.ZipFile(zip_path, "r") as z:
-              z.extractall("/tmp/bots/extracted/")
-              archivos = z.namelist()
-              print(f"Archivos en zip: {archivos}")
-
-            import os as _os
-            bot_file = None
-
-            for root, dirs, files in _os.walk("/tmp/bots/extracted/"):
-              for fname in files:
-                fpath = _os.path.join(root, fname)
-                if fname == "manifest.json":
-                  continue
-                if "Metadata" in root:
-                  continue
-                if fname == bot_name or not fname.endswith((".png",".xml",".json")):
-                  bot_file = fpath
-                  print(f"Bot encontrado: {fpath}")
-                  break
-              if bot_file:
-                break
-
-            if not bot_file:
-              candidates = []
-              for root, dirs, files in _os.walk("/tmp/bots/extracted/"):
-                for fname in files:
-                  if "Metadata" in root or fname == "manifest.json":
-                    continue
-                  if fname.endswith((".png", ".xml")):
-                    continue
-                  fpath = _os.path.join(root, fname)
-                  candidates.append((fpath, _os.path.getsize(fpath)))
-              if candidates:
-                candidates.sort(key=lambda x: x[1], reverse=True)
-                bot_file = candidates[0][0]
-                print(f"Bot seleccionado (mas grande): {bot_file}")
-
-            if bot_file:
-              shutil.copy(bot_file, f"/tmp/bots/{bot_name}")
-              print(f"[OK] Bot copiado para analisis: {bot_name}")
-            else:
-              print("WARN: No se encontro el archivo del bot, usando primer archivo")
-              shutil.copy(f"/tmp/bots/extracted/{archivos[0]}", f"/tmp/bots/{bot_name}")
-
-          except Exception as e:
-            print(f"WARN: Error extrayendo zip: {e}")
-            shutil.copy(zip_path, f"/tmp/bots/{bot_name}")
-            print(f"[OK] Archivo guardado directamente como: {bot_name}")
-
-          open("/tmp/aa_token.txt", "w").write(token)
-          open("/tmp/bot_id.txt", "w").write(bot_id)
-
-          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
-            f.write(f"bot_id={bot_id}\n")
-            f.write(f"bot_nombre={bot_name}\n")
-            f.write(f"bot_carpeta={bot_folder}\n")
+          with open("/tmp/aa/bots.json", "w") as f:
+            json.dump(bots, f, indent=2)
+          print(f"\nbots.json guardado con {len(bots)} bot(s)")
           PYEOF
 
-      # -----------------------------------------------------------------
-      # ANALISIS DEL BOT
-      # -----------------------------------------------------------------
-      - name: Validar sintaxis JSON
-        env:
-          BOT_NOMBRE: ${{ steps.buscar_bot.outputs.bot_nombre }}
-        run: |
-          set +e
-          echo "=============================="
-          echo "  VALIDACION DE SINTAXIS JSON"
-          echo "=============================="
-          ERRORS=0
-          BOT_FILE="/tmp/bots/$BOT_NOMBRE"
-          [ ! -f "$BOT_FILE" ] && BOT_FILE=$(find /tmp/bots/ -type f -not -name "*.zip" -not -name "manifest.json" -not -name "*.png" -not -name "*.xml" | head -1)
-          echo "Validando: $BOT_FILE"
-          if python3 -c "import json; json.load(open('$BOT_FILE'))" 2>/dev/null; then
-            echo "[OK] Sintaxis JSON valida: $(basename $BOT_FILE)"
-          else
-            echo "[ERROR] Sintaxis invalida: $(basename $BOT_FILE)"
-            ERRORS=$((ERRORS + 1))
-          fi
-          if [ "$ERRORS" -gt 0 ]; then
-            echo "::error::$ERRORS archivo(s) con sintaxis JSON invalida"
-            exit 1
-          fi
-          echo "[OK] Todos los archivos tienen sintaxis JSON valida"
-
-      - name: Escanear credenciales expuestas
-        id: credential_scan
-        env:
-          BOT_NOMBRE: ${{ steps.buscar_bot.outputs.bot_nombre }}
-        run: |
-          set +e
-          echo "=============================="
-          echo "  DETECCION DE CREDENCIALES"
-          echo "=============================="
-          VIOLATIONS=0
-          CRED_DETAILS=""
-
-          BOT_FILE="/tmp/bots/$BOT_NOMBRE"
-          if [ ! -f "$BOT_FILE" ]; then
-            echo "[WARN] No se encontro el bot en /tmp/bots/$BOT_NOMBRE"
-            BOT_FILE=$(find /tmp/bots/ -type f -not -name "*.zip" -not -name "manifest.json" -not -name "*.png" -not -name "*.xml" | head -1)
-          fi
-          echo "Analizando credenciales en: $BOT_FILE"
-
-          if [ -f "$BOT_FILE" ]; then
-            FILE_WARNED=0
-
-            for var in password passwd secret api_key apikey token connectionstring; do
-              if grep -qi "\"variableName\".*\".*${var}.*\"" "$BOT_FILE" 2>/dev/null; then
-                echo "[ERROR] Variable sensible encontrada: $var"
-                CRED_DETAILS="${CRED_DETAILS}Variable sensible: $var;"
-                FILE_WARNED=1
-                VIOLATIONS=$((VIOLATIONS + 1))
-              fi
-            done
-
-            for pattern in "jdbc:" "mongodb://" "postgresql://" "mysql://" "password=" "pwd="; do
-              if grep -q "$pattern" "$BOT_FILE" 2>/dev/null; then
-                echo "[ERROR] Credencial hardcodeada detectada: $pattern"
-                CRED_DETAILS="${CRED_DETAILS}Credencial hardcodeada: $pattern;"
-                FILE_WARNED=1
-                VIOLATIONS=$((VIOLATIONS + 1))
-              fi
-            done
-
-            [ "$FILE_WARNED" -eq 0 ] && echo "[OK] Sin credenciales expuestas: $(basename $BOT_FILE)"
-          else
-            echo "[WARN] No se encontro archivo de bot para analizar"
-          fi
-
-          echo "Total violations de credenciales: $VIOLATIONS"
-          echo "credential_violations=$VIOLATIONS" >> $GITHUB_OUTPUT
-          echo "credential_details=$CRED_DETAILS" >> $GITHUB_OUTPUT
-
-          if [ "$VIOLATIONS" -gt 0 ]; then
-            echo "::error::$VIOLATIONS credencial(es) expuesta(s) encontrada(s) - bot bloqueado"
-          fi
-          exit 0
-
-      - name: Verificar buenas practicas
-        id: best_practices
-        env:
-          BOT_NOMBRE: ${{ steps.buscar_bot.outputs.bot_nombre }}
-        run: |
-          set +e
-          echo "=============================="
-          echo "  BUENAS PRACTICAS"
-          echo "=============================="
-          BOT_FILE="/tmp/bots/$BOT_NOMBRE"
-          [ ! -f "$BOT_FILE" ] && BOT_FILE=$(find /tmp/bots/ -type f -not -name "*.zip" -not -name "manifest.json" -not -name "*.png" -not -name "*.xml" | head -1)
-
-          BP_TRY="false"; BP_COMMENTS=0; BP_VAULT="false"
-          for file in "$BOT_FILE"; do
-            [ -f "$file" ] || continue
-            echo "Bot: $(basename $file)"
-            if grep -q '"commandName":"try"' "$file"; then
-              echo "  [OK] Tiene manejo de errores"
-              BP_TRY="true"
-            else
-              echo "  [WARN] Sin try/catch"
-            fi
-            BP_COMMENTS=$(grep -c '"commandName":"Comment"' "$file" 2>/dev/null || echo 0)
-            [ "$BP_COMMENTS" -gt 0 ] \
-              && echo "  [OK] Tiene $BP_COMMENTS comentario(s)" \
-              || echo "  [WARN] Sin comentarios"
-            if grep -q '"lockerName"' "$file"; then
-              echo "  [OK] Usa Credential Vault"
-              BP_VAULT="true"
-            else
-              echo "  [INFO] No usa Credential Vault"
-            fi
-          done
-
-          mkdir -p /tmp/reports
-          printf '{"try_catch": %s, "comments": %d, "credential_vault": %s}' \
-            "$BP_TRY" "$BP_COMMENTS" "$BP_VAULT" > /tmp/reports/best_practices.json
-          echo "Best practices guardadas"
-          exit 0
-
-      - name: Code Analysis de AA via API
-        id: code_analysis
+      - name: Exportar y analizar cada bot
+        id: analizar
         env:
           AA_URL:           ${{ secrets.AA_URL }}
           AA_USERNAME:      ${{ secrets.AA_USERNAME }}
           AA_API_KEY:       ${{ secrets.AA_API_KEY }}
           AA_AUTH_ENDPOINT: ${{ secrets.AA_AUTH_ENDPOINT }}
-          BOT_ID:           ${{ steps.buscar_bot.outputs.bot_id }}
-          BOT_NOMBRE:       ${{ steps.buscar_bot.outputs.bot_nombre }}
+          BOT_CARPETA:      ${{ github.event.inputs.bot_carpeta }}
         run: |
           python3 - << 'PYEOF'
-          import json, urllib.request, ssl, os, sys
+          import json, urllib.request, ssl, os, sys, time, zipfile, shutil
+          from datetime import datetime
 
           aa_url    = os.environ["AA_URL"]
           username  = os.environ["AA_USERNAME"]
           api_key   = os.environ["AA_API_KEY"]
           endpoint  = os.environ.get("AA_AUTH_ENDPOINT", "/v2/authentication")
-          bot_id    = os.environ["BOT_ID"]
-          bot_name  = os.environ["BOT_NOMBRE"]
 
           ctx = ssl.create_default_context()
 
+          # Login
           payload = json.dumps({"username": username, "apiKey": api_key}).encode("utf-8")
           req = urllib.request.Request(
             aa_url + endpoint, data=payload,
             headers={"Content-Type": "application/json"}
           )
-          try:
-            with urllib.request.urlopen(req, context=ctx, timeout=30) as r:
-              token = json.loads(r.read().decode("utf-8")).get("token", "")
-          except Exception as e:
-            print(f"ERROR login: {e}")
-            sys.exit(0)
+          with urllib.request.urlopen(req, context=ctx, timeout=30) as r:
+            token = json.loads(r.read().decode("utf-8")).get("token", "")
+          hdrs = {"Content-Type": "application/json", "X-Authorization": token}
 
-          hdrs    = {"Content-Type": "application/json", "X-Authorization": token}
-          payload = json.dumps({"fileId": bot_id, "excludeChildBots": True}).encode("utf-8")
+          # Leer lista de bots
+          with open("/tmp/aa/bots.json") as f:
+            bots = json.load(f)
 
-          crit=0; high=0; low=0; issues=[]
-          try:
-            req = urllib.request.Request(
-              aa_url + "/v2/policy/bot/analysis", data=payload, headers=hdrs
-            )
-            with urllib.request.urlopen(req, context=ctx, timeout=60) as r:
-              s = json.loads(r.read().decode("utf-8")).get("ruleViolationSummary", {})
-              crit = s.get("criticalSeverityCount", 0)
-              high = s.get("highSeverityCount", 0)
-              low  = s.get("lowSeverityCount", 0)
-              print(f"Code Analysis -> Critical:{crit} High:{high} Low:{low}")
-          except Exception as e:
-            print(f"ERROR Code Analysis: {e}", file=sys.stderr)
-
-          try:
-            req = urllib.request.Request(
-              aa_url + "/v2/policy/bot/analysis/details", data=payload, headers=hdrs
-            )
-            with urllib.request.urlopen(req, context=ctx, timeout=60) as r:
-              entries = json.loads(r.read().decode("utf-8")).get(
-                "ruleViolationReport", {}
-              ).get("ruleViolationEntries", [])
-              for entry in entries:
-                var_name = entry.get("variable", {}).get("name", "N/A")
-                for v in entry.get("ruleViolations", []):
-                  issues.append({
-                    "variable": var_name,
-                    "rule":     v.get("ruleName", ""),
-                    "label":    v.get("ruleLabel", ""),
-                    "severity": v.get("ruleSeverity", ""),
-                  })
-          except Exception as e:
-            print(f"ERROR detalles: {e}", file=sys.stderr)
-
-          report = {"bot": bot_name, "critical": crit, "high": high, "low": low, "issues": issues}
+          os.makedirs("/tmp/bots", exist_ok=True)
           os.makedirs("/tmp/reports", exist_ok=True)
-          with open("/tmp/reports/aa_analysis.json", "w") as f:
-            json.dump(report, f, indent=2)
 
-          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
-            f.write(f"total_critical={crit}\n")
-            f.write(f"total_high={high}\n")
-            f.write(f"total_low={low}\n")
+          resultados = []
 
-          print(f"Reporte guardado: Critical={crit} High={high} Low={low}")
+          for bot in bots:
+            bot_id   = bot["id"]
+            bot_name = bot["nombre"]
+            print(f"\n{'='*50}")
+            print(f"Procesando: {bot_name} (ID: {bot_id})")
+            print(f"{'='*50}")
+
+            resultado = {
+              "id":       bot_id,
+              "nombre":   bot_name,
+              "critical": 0,
+              "high":     0,
+              "low":      0,
+              "cred_viol": 0,
+              "cred_details": [],
+              "bp_try":   False,
+              "bp_cmts":  0,
+              "bp_vault": False,
+              "issues":   [],
+              "estado":   "APROBADO",
+              "errores":  []
+            }
+
+            # ---- EXPORTAR ----
+            try:
+              export_name = f"{bot_name}_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+              payload = json.dumps({
+                "name": export_name,
+                "fileIds": [int(bot_id)],
+                "includePackages": False,
+                "includeTableValues": False
+              }).encode("utf-8")
+              req = urllib.request.Request(
+                aa_url + "/v2/blm/export", data=payload, headers=hdrs
+              )
+              with urllib.request.urlopen(req, context=ctx, timeout=30) as r:
+                request_id = json.loads(r.read().decode("utf-8")).get("requestId", "")
+              print(f"Export iniciado | requestId: {request_id}")
+
+              # Esperar COMPLETED
+              status = ""; download_file_id = ""
+              for intento in range(20):
+                time.sleep(4)
+                for ep in [f"/v2/blm/export/{request_id}", f"/v2/blm/status/{request_id}"]:
+                  try:
+                    req = urllib.request.Request(aa_url + ep, headers=hdrs, method="GET")
+                    with urllib.request.urlopen(req, context=ctx, timeout=30) as r:
+                      resp = json.loads(r.read().decode("utf-8"))
+                      status = resp.get("status", "")
+                      download_file_id = str(resp.get("downloadFileId", ""))
+                      print(f"  Intento {intento+1} | {status} | dlId: {download_file_id}")
+                      break
+                  except urllib.error.HTTPError as e:
+                    if e.code == 404: continue
+                if status == "COMPLETED": break
+                elif status in ["FAILED", "ERROR"]:
+                  raise Exception(f"Export fallido: {status}")
+
+              if status != "COMPLETED":
+                raise Exception(f"Timeout esperando export. Estado: {status}")
+
+              if not download_file_id or download_file_id == "None":
+                download_file_id = request_id
+
+              # Descargar zip
+              bot_content = None
+              for ep in [f"/v2/blm/download/{download_file_id}", f"/v2/blm/export/{download_file_id}/file"]:
+                try:
+                  req = urllib.request.Request(aa_url + ep, headers=hdrs, method="GET")
+                  with urllib.request.urlopen(req, context=ctx, timeout=60) as r:
+                    bot_content = r.read()
+                    print(f"[OK] Descargado: {len(bot_content)} bytes")
+                    break
+                except: continue
+
+              if not bot_content:
+                raise Exception("No se pudo descargar el zip del bot")
+
+              # Extraer archivo del bot
+              zip_path = f"/tmp/bots/{bot_name}.zip"
+              open(zip_path, "wb").write(bot_content)
+
+              bot_file = None
+              try:
+                extract_dir = f"/tmp/bots/extracted_{bot_id}"
+                with zipfile.ZipFile(zip_path, "r") as z:
+                  z.extractall(extract_dir)
+                  archivos = z.namelist()
+
+                import os as _os
+                # Buscar archivo del bot (no metadata, no manifest)
+                candidates = []
+                for root, dirs, files in _os.walk(extract_dir):
+                  for fname in files:
+                    if fname == "manifest.json" or "Metadata" in root: continue
+                    if fname.endswith((".png", ".xml")): continue
+                    fpath = _os.path.join(root, fname)
+                    candidates.append((fpath, _os.path.getsize(fpath)))
+
+                if candidates:
+                  candidates.sort(key=lambda x: x[1], reverse=True)
+                  bot_file = candidates[0][0]
+                  dest = f"/tmp/bots/{bot_name}"
+                  shutil.copy(bot_file, dest)
+                  print(f"[OK] Bot extraido: {bot_file}")
+              except Exception as e:
+                print(f"WARN extraccion: {e}")
+                shutil.copy(zip_path, f"/tmp/bots/{bot_name}")
+
+            except Exception as e:
+              err = f"Error en export: {e}"
+              print(f"[ERROR] {err}")
+              resultado["errores"].append(err)
+              resultado["estado"] = "RECHAZADO"
+              resultados.append(resultado)
+              continue
+
+            # ---- ANALIZAR CREDENCIALES ----
+            bot_file_path = f"/tmp/bots/{bot_name}"
+            if os.path.exists(bot_file_path):
+              try:
+                with open(bot_file_path, "r", errors="ignore") as f:
+                  content = f.read()
+
+                for var in ["password", "passwd", "secret", "api_key", "apikey", "token", "connectionstring"]:
+                  import re
+                  if re.search(rf'"variableName".*"{var}"', content, re.IGNORECASE):
+                    resultado["cred_viol"] += 1
+                    resultado["cred_details"].append(f"Variable sensible: {var}")
+                    print(f"  [ERROR] Credencial - variable sensible: {var}")
+
+                for pattern in ["jdbc:", "mongodb://", "postgresql://", "mysql://", "password=", "pwd="]:
+                  if pattern in content:
+                    resultado["cred_viol"] += 1
+                    resultado["cred_details"].append(f"Hardcodeado: {pattern}")
+                    print(f"  [ERROR] Credencial hardcodeada: {pattern}")
+
+                if resultado["cred_viol"] == 0:
+                  print(f"  [OK] Sin credenciales expuestas")
+
+              except Exception as e:
+                print(f"  WARN analisis credenciales: {e}")
+
+              # ---- BUENAS PRACTICAS ----
+              try:
+                with open(bot_file_path, "r", errors="ignore") as f:
+                  content = f.read()
+
+                resultado["bp_try"]  = '"commandName":"try"' in content
+                resultado["bp_cmts"] = content.count('"commandName":"Comment"')
+                resultado["bp_vault"] = '"lockerName"' in content
+
+                print(f"  [BP] try/catch: {resultado['bp_try']} | comentarios: {resultado['bp_cmts']} | vault: {resultado['bp_vault']}")
+              except Exception as e:
+                print(f"  WARN buenas practicas: {e}")
+
+            # ---- CODE ANALYSIS via API ----
+            try:
+              payload = json.dumps({"fileId": bot_id, "excludeChildBots": True}).encode("utf-8")
+
+              req = urllib.request.Request(
+                aa_url + "/v2/policy/bot/analysis", data=payload, headers=hdrs
+              )
+              with urllib.request.urlopen(req, context=ctx, timeout=60) as r:
+                s = json.loads(r.read().decode("utf-8")).get("ruleViolationSummary", {})
+                resultado["critical"] = s.get("criticalSeverityCount", 0)
+                resultado["high"]     = s.get("highSeverityCount", 0)
+                resultado["low"]      = s.get("lowSeverityCount", 0)
+                print(f"  [CA] Critical:{resultado['critical']} High:{resultado['high']} Low:{resultado['low']}")
+
+              req = urllib.request.Request(
+                aa_url + "/v2/policy/bot/analysis/details", data=payload, headers=hdrs
+              )
+              with urllib.request.urlopen(req, context=ctx, timeout=60) as r:
+                entries = json.loads(r.read().decode("utf-8")).get(
+                  "ruleViolationReport", {}
+                ).get("ruleViolationEntries", [])
+                for entry in entries:
+                  var_name = entry.get("variable", {}).get("name", "N/A")
+                  for v in entry.get("ruleViolations", []):
+                    resultado["issues"].append({
+                      "variable": var_name,
+                      "rule":     v.get("ruleName", ""),
+                      "label":    v.get("ruleLabel", ""),
+                      "severity": v.get("ruleSeverity", ""),
+                    })
+            except Exception as e:
+              print(f"  WARN Code Analysis: {e}")
+
+            # ---- ESTADO FINAL DEL BOT ----
+            if resultado["critical"] > 0 or resultado["high"] > 0 or resultado["cred_viol"] > 0:
+              resultado["estado"] = "RECHAZADO"
+            else:
+              resultado["estado"] = "APROBADO"
+
+            print(f"  -> Estado: {resultado['estado']}")
+            resultados.append(resultado)
+
+          # Guardar resultados
+          with open("/tmp/reports/resultados.json", "w") as f:
+            json.dump(resultados, f, indent=2)
+          print(f"\nResultados guardados: {len(resultados)} bot(s) procesados")
+
+          for r in resultados:
+            print(f"  {r['nombre']}: {r['estado']} (Crit:{r['critical']} High:{r['high']} Cred:{r['cred_viol']})")
           PYEOF
 
-      - name: Subir reporte como artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: reporte-analisis
-          path: /tmp/reports/
-          retention-days: 7
-
-      - name: Generar reporte HTML
-        id: generar_reporte
+      - name: Evaluar gate global y generar reporte HTML
+        id: gate
         env:
-          BOT_NOMBRE:            ${{ steps.buscar_bot.outputs.bot_nombre }}
-          BOT_CARPETA:           ${{ steps.buscar_bot.outputs.bot_carpeta }}
-          RUN_ID:                ${{ github.run_id }}
-          REPO:                  ${{ github.repository }}
-          CREDENTIAL_VIOLATIONS: ${{ steps.credential_scan.outputs.credential_violations }}
+          BOT_CARPETA: ${{ github.event.inputs.bot_carpeta }}
+          RUN_ID:      ${{ github.run_id }}
+          REPO:        ${{ github.repository }}
         run: |
           python3 - << 'PYEOF'
           import json, os
 
-          bot_name   = os.environ["BOT_NOMBRE"]
           bot_folder = os.environ["BOT_CARPETA"]
           run_id     = os.environ["RUN_ID"]
           repo       = os.environ["REPO"]
 
-          # --- Code Analysis ---
-          report = {"bot": bot_name, "critical": 0, "high": 0, "low": 0, "issues": []}
-          if os.path.exists("/tmp/reports/aa_analysis.json"):
-            with open("/tmp/reports/aa_analysis.json") as f:
-              report = json.load(f)
-          c      = report.get("critical", 0)
-          h      = report.get("high", 0)
-          l      = report.get("low", 0)
-          issues = report.get("issues", [])
+          with open("/tmp/reports/resultados.json") as f:
+            resultados = json.load(f)
 
-          # --- Credenciales ---
-          cred_viol = int(os.environ.get("CREDENTIAL_VIOLATIONS", "0"))
+          # Gate global: todos deben pasar
+          fallidos   = [r for r in resultados if r["estado"] == "RECHAZADO"]
+          aprobados  = [r for r in resultados if r["estado"] == "APROBADO"]
+          gate_ok    = len(fallidos) == 0
+          total      = len(resultados)
 
-          # --- Buenas practicas ---
-          bp = {"try_catch": False, "comments": 0, "credential_vault": False}
-          if os.path.exists("/tmp/reports/best_practices.json"):
-            with open("/tmp/reports/best_practices.json") as f:
-              bp = json.load(f)
-          bp_try   = bp.get("try_catch", False)
-          bp_cmts  = int(bp.get("comments", 0))
-          bp_vault = bp.get("credential_vault", False)
+          print(f"Gate global: {'OK' if gate_ok else 'BLOQUEADO'}")
+          print(f"  Aprobados: {len(aprobados)}/{total}")
+          print(f"  Fallidos:  {len(fallidos)}/{total}")
 
-          # --- Gate: considera TODO ---
-          bloqueado = c > 0 or h > 0 or cred_viol > 0
-          if bloqueado:
-            gate_color = "#dc3545"
-            razones_gate = []
-            if c > 0:         razones_gate.append(f"{c} violation(es) Critical en Code Analysis")
-            if h > 0:         razones_gate.append(f"{h} violation(es) High en Code Analysis")
-            if cred_viol > 0: razones_gate.append(f"{cred_viol} credencial(es) expuesta(s)")
-            gate_status = "RECHAZADO - " + " | ".join(razones_gate)
-          else:
-            gate_color  = "#28a745"
-            gate_status = "APROBADO - Listo para pasar a Publica"
+          # IDs para check-in (todos, solo se usan si gate_ok)
+          bot_ids_json = json.dumps([r["id"] for r in resultados])
 
-          # --- Filas violations Code Analysis ---
-          issues_rows = ""
-          for issue in issues:
-            sev   = issue.get("severity", "")
-            color = "#dc3545" if sev == "CRITICAL" else "#ff6600" if sev == "HIGH" else "#ffc107"
-            issues_rows += f"""
+          # Outputs para GitHub Actions
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+            f.write(f"gate_ok={'true' if gate_ok else 'false'}\n")
+            f.write(f"bots_count={total}\n")
+            f.write(f"bots_fallidos={len(fallidos)}\n")
+            f.write(f"bot_ids_json={bot_ids_json}\n")
+
+          # ---- GENERAR REPORTE HTML ----
+          gate_color  = "#28a745" if gate_ok else "#dc3545"
+          gate_texto  = f"APROBADO - Todos los bots ({total}/{total}) listos para Publica" if gate_ok else \
+                        f"RECHAZADO - {len(fallidos)} de {total} bot(s) fallaron el gate"
+
+          # Filas de la tabla resumen
+          filas_resumen = ""
+          for r in resultados:
+            ok    = r["estado"] == "APROBADO"
+            color = "#28a745" if ok else "#dc3545"
+            icon  = "&#10003;" if ok else "&#10007;"
+            cred  = f"&#10003;" if r["cred_viol"] == 0 else f"&#9888; {r['cred_viol']}"
+            ca    = "&#10003; Sin violations" if r["critical"] == 0 and r["high"] == 0 \
+                    else f"&#10007; {r['critical']} Critical / {r['high']} High"
+            bp    = "&#10003;" if r["bp_try"] and r["bp_cmts"] > 0 else "&#9888;"
+            filas_resumen += f"""
             <tr>
-              <td>{issue.get('variable','')}</td>
-              <td>{issue.get('rule','')}</td>
-              <td>{issue.get('label','')}</td>
-              <td style="color:{color};font-weight:bold">{sev}</td>
+              <td><strong>{r['nombre']}</strong><br><small style="color:#888">ID: {r['id']}</small></td>
+              <td style="text-align:center">{cred}</td>
+              <td style="text-align:center">{bp}</td>
+              <td style="text-align:center">{ca}</td>
+              <td style="text-align:center;color:{color};font-weight:bold">{icon} {r['estado']}</td>
             </tr>"""
 
-          # --- Filas validaciones con resultado real ---
-          def val_row(label, ok, detail=""):
-            icon  = "&#10003;" if ok else "&#9888;"
-            color = "#28a745" if ok else "#e67e22"
-            text  = detail if detail else ("Correcto" if ok else "Advertencia")
-            bg    = "#f0fff4" if ok else "#fff8f0"
-            return f"<tr style='background:{bg}'><td>{icon} {label}</td><td style='color:{color};font-weight:bold'>{text}</td></tr>"
+          # Detalle por bot (solo los que fallaron o tienen issues)
+          detalle_bots = ""
+          for r in resultados:
+            if r["estado"] == "RECHAZADO" or r["issues"] or r["cred_details"]:
+              ok_color  = "#dc3545"
+              issues_html = ""
 
-          val_rows  = val_row("Sintaxis JSON", True, "Valida")
-          val_rows += val_row("Credenciales expuestas", cred_viol == 0,
-                              "Sin credenciales hardcodeadas" if cred_viol == 0 else f"{cred_viol} credencial(es) encontrada(s)")
-          val_rows += val_row("Manejo de errores (try/catch)", bp_try,
-                              "Implementado" if bp_try else "Sin bloque try/catch")
-          val_rows += val_row("Comentarios en el bot", bp_cmts > 0,
-                              f"{bp_cmts} comentario(s)" if bp_cmts > 0 else "Sin comentarios")
-          val_rows += val_row("Credential Vault", bp_vault,
-                              "Usa Credential Vault" if bp_vault else "No usa Credential Vault (informativo)")
-          val_rows += val_row("Code Analysis AA", c == 0 and h == 0,
-                              "Sin violations criticas" if c == 0 and h == 0 else f"{c} Critical / {h} High")
+              if r["cred_details"]:
+                for d in r["cred_details"]:
+                  issues_html += f"<li style='color:#dc3545'>&#10007; Credencial: {d}</li>"
+
+              if not r["bp_try"]:
+                issues_html += "<li style='color:#e67e22'>&#9888; Sin bloque try/catch</li>"
+              if r["bp_cmts"] == 0:
+                issues_html += "<li style='color:#e67e22'>&#9888; Sin comentarios</li>"
+
+              for issue in r["issues"]:
+                sev   = issue.get("severity","")
+                col   = "#dc3545" if sev == "CRITICAL" else "#ff6600" if sev == "HIGH" else "#ffc107"
+                issues_html += f"<li style='color:{col}'>[{sev}] {issue.get('label','')} - Variable: {issue.get('variable','')}</li>"
+
+              if issues_html:
+                detalle_bots += f"""
+                <div style="margin:15px 0;padding:15px;border-left:4px solid {ok_color};background:#fff8f8;border-radius:4px">
+                  <strong>{r['nombre']}</strong> (ID: {r['id']})
+                  <ul style="margin-top:8px">{issues_html}</ul>
+                </div>"""
 
           url = f"https://github.com/{repo}/actions/runs/{run_id}"
 
@@ -625,7 +528,7 @@ jobs:
           <html>
           <head>
             <meta charset="UTF-8">
-            <title>Reporte AA - {bot_name}</title>
+            <title>Reporte DevSecOps AA - {bot_folder}</title>
             <style>
               body {{ font-family: Arial, sans-serif; margin: 30px; color: #333; }}
               h1 {{ color: #0078d4; }}
@@ -633,6 +536,7 @@ jobs:
               table {{ border-collapse: collapse; width: 100%; margin-top: 10px; }}
               th {{ background: #0078d4; color: white; padding: 10px; text-align: left; }}
               td {{ border: 1px solid #ddd; padding: 8px; }}
+              tr:nth-child(even) {{ background: #f9f9f9; }}
               .gate {{ padding: 20px; border-radius: 8px; text-align: center;
                        font-size: 16px; font-weight: bold; margin: 20px 0;
                        background: {gate_color}22; border: 2px solid {gate_color}; color: {gate_color}; }}
@@ -645,33 +549,27 @@ jobs:
           <body>
             <h1>Reporte DevSecOps - Automation Anywhere</h1>
             <div class="info">
-              <strong>Bot analizado:</strong> {bot_name}<br>
-              <strong>Carpeta:</strong> {bot_folder}<br>
+              <strong>Carpeta analizada:</strong> {bot_folder}<br>
+              <strong>Bots procesados:</strong> {total}<br>
               <strong>Run ID:</strong> {run_id}
             </div>
 
             <h2>Estado del Gate DevSecOps</h2>
-            <div class="gate">{gate_status}</div>
+            <div class="gate">{gate_texto}</div>
 
-            <h2>Validaciones realizadas</h2>
+            <h2>Resumen por bot</h2>
             <table>
-              <tr><th>Validacion</th><th>Resultado</th></tr>
-              {val_rows}
+              <tr>
+                <th>Bot</th>
+                <th style="text-align:center">Credenciales</th>
+                <th style="text-align:center">Buenas Practicas</th>
+                <th style="text-align:center">Code Analysis</th>
+                <th style="text-align:center">Estado</th>
+              </tr>
+              {filas_resumen}
             </table>
 
-            <h2>Resumen Code Analysis</h2>
-            <table>
-              <tr><th>Severidad</th><th>Cantidad</th></tr>
-              <tr><td style="color:darkred;font-weight:bold">Critical</td><td>{c}</td></tr>
-              <tr><td style="color:red">High</td><td>{h}</td></tr>
-              <tr><td style="color:orange">Low</td><td>{l}</td></tr>
-            </table>
-
-            <h2>Detalle de Violations (Code Analysis)</h2>
-            <table>
-              <tr><th>Variable</th><th>Regla</th><th>Descripcion</th><th>Severidad</th></tr>
-              {issues_rows if issues_rows else "<tr><td colspan='4' style='text-align:center'>Sin violations</td></tr>"}
-            </table>
+            {'<h2>Detalle de problemas encontrados</h2>' + detalle_bots if detalle_bots else ''}
 
             <br>
             <a class="btn" href="{url}">Ver detalle en GitHub Actions</a>
@@ -686,11 +584,11 @@ jobs:
           print("Reporte HTML generado")
           PYEOF
 
-      - name: Subir reporte HTML
+      - name: Subir reportes como artifact
         uses: actions/upload-artifact@v4
         with:
-          name: reporte-html
-          path: /tmp/reports/reporte_final.html
+          name: reportes-devsecops
+          path: /tmp/reports/
           retention-days: 7
 
 # =================================================================
@@ -699,78 +597,67 @@ jobs:
   notificar_lider:
     name: '2. Notificar al lider por correo'
     runs-on: ubuntu-latest
-    needs:
-      - exportar_bot
+    needs: analizar_bots
 
     steps:
-      - name: Descargar reporte HTML
+      - name: Descargar reportes
         uses: actions/download-artifact@v4
         with:
-          name: reporte-html
+          name: reportes-devsecops
           path: /tmp/reports/
 
-      - name: Enviar reporte completo al lider
+      - name: Enviar correo con tabla resumen
         env:
-          MAIL_USERNAME:         ${{ secrets.MAIL_USERNAME }}
-          MAIL_PASSWORD:         ${{ secrets.MAIL_PASSWORD }}
-          MAIL_TO:               ${{ secrets.MAIL_TO }}
-          BOT_NOMBRE:            ${{ needs.exportar_bot.outputs.bot_nombre }}
-          TOTAL_CRITICAL:        ${{ needs.exportar_bot.outputs.total_critical }}
-          TOTAL_HIGH:            ${{ needs.exportar_bot.outputs.total_high }}
-          CREDENTIAL_VIOLATIONS: ${{ needs.exportar_bot.outputs.credential_violations }}
-          RUN_ID:                ${{ github.run_id }}
-          REPO:                  ${{ github.repository }}
+          MAIL_USERNAME:  ${{ secrets.MAIL_USERNAME }}
+          MAIL_PASSWORD:  ${{ secrets.MAIL_PASSWORD }}
+          MAIL_TO:        ${{ secrets.MAIL_TO }}
+          BOT_CARPETA:    ${{ github.event.inputs.bot_carpeta }}
+          GATE_OK:        ${{ needs.analizar_bots.outputs.gate_ok }}
+          BOTS_COUNT:     ${{ needs.analizar_bots.outputs.bots_count }}
+          BOTS_FALLIDOS:  ${{ needs.analizar_bots.outputs.bots_fallidos }}
+          RUN_ID:         ${{ github.run_id }}
+          REPO:           ${{ github.repository }}
         run: |
           python3 - << 'PYEOF'
           import smtplib, os
           from email.mime.multipart import MIMEMultipart
           from email.mime.text import MIMEText
 
-          mail_from     = os.environ["MAIL_USERNAME"]
-          mail_pass     = os.environ["MAIL_PASSWORD"]
-          mail_to_list  = [m.strip() for m in os.environ["MAIL_TO"].split(",")]
-          bot_name      = os.environ["BOT_NOMBRE"]
-          critical      = int(os.environ.get("TOTAL_CRITICAL", 0))
-          high          = int(os.environ.get("TOTAL_HIGH", 0))
-          cred_viol     = int(os.environ.get("CREDENTIAL_VIOLATIONS", 0))
-          run_id        = os.environ["RUN_ID"]
-          repo          = os.environ["REPO"]
-          url           = f"https://github.com/{repo}/actions/runs/{run_id}"
+          mail_from    = os.environ["MAIL_USERNAME"]
+          mail_pass    = os.environ["MAIL_PASSWORD"]
+          mail_to_list = [m.strip() for m in os.environ["MAIL_TO"].split(",")]
+          carpeta      = os.environ["BOT_CARPETA"]
+          gate_ok      = os.environ["GATE_OK"] == "true"
+          bots_count   = os.environ["BOTS_COUNT"]
+          bots_fallidos= os.environ["BOTS_FALLIDOS"]
+          run_id       = os.environ["RUN_ID"]
+          repo         = os.environ["REPO"]
 
-          bloqueado = critical > 0 or high > 0 or cred_viol > 0
-          emoji     = "[ERROR]" if bloqueado else "[OK]"
-          estado    = "RECHAZADO" if bloqueado else "APROBADO"
+          emoji   = "[OK]" if gate_ok else "[ERROR]"
+          estado  = "APROBADO" if gate_ok else "RECHAZADO"
 
-          reporte_html = ""
+          body_html = ""
           if os.path.exists("/tmp/reports/reporte_final.html"):
             with open("/tmp/reports/reporte_final.html", "r") as f:
-              reporte_html = f.read()
+              body_html = f.read()
 
-          if reporte_html:
-            body_html = reporte_html
-          else:
-            razones = []
-            if critical > 0: razones.append(f"{critical} violation(es) Critical")
-            if high > 0:     razones.append(f"{high} violation(es) High")
-            if cred_viol > 0: razones.append(f"{cred_viol} credencial(es) expuesta(s)")
-            razones_html = "".join(f"<li>{r}</li>" for r in razones)
-            color = "#dc3545" if bloqueado else "#28a745"
+          if not body_html:
+            url = f"https://github.com/{repo}/actions/runs/{run_id}"
+            color = "#28a745" if gate_ok else "#dc3545"
             body_html = f"""
             <html><body style="font-family:Arial,sans-serif;margin:20px">
-              <h2 style="color:#0078d4">{emoji} Resultado DevSecOps - {bot_name}</h2>
+              <h2 style="color:#0078d4">{emoji} DevSecOps - Carpeta {carpeta}</h2>
               <div style="padding:15px;border-radius:8px;background:{color}22;
-                          border:2px solid {color};color:{color};
-                          font-weight:bold;text-align:center;margin:20px 0">
-                {estado}
+                          border:2px solid {color};color:{color};font-weight:bold;text-align:center">
+                {estado} - {bots_fallidos} de {bots_count} bots fallaron el gate
               </div>
-              <ul>{razones_html}</ul>
               <a href="{url}" style="background:#0078d4;color:white;padding:12px 24px;
-                 text-decoration:none;border-radius:5px;display:inline-block">
+                 text-decoration:none;border-radius:5px;display:inline-block;margin-top:20px">
                 Ver detalle en GitHub Actions
               </a>
             </body></html>"""
 
-          subject = f"[DevSecOps AA] {emoji} Bot '{bot_name}' - {estado}"
+          subject = f"[DevSecOps AA] {emoji} Carpeta '{carpeta}' - {estado} ({bots_fallidos} fallidos de {bots_count})"
 
           msg = MIMEMultipart("alternative")
           msg["Subject"] = subject
@@ -788,26 +675,24 @@ jobs:
           PYEOF
 
 # =================================================================
-# JOB 3: CHECK-IN A PUBLICA EN AA
-# Solo corre si no hay violations Critical/High ni credenciales
+# JOB 3: CHECK-IN A PUBLICA (solo si gate_ok = true)
 # =================================================================
-  publicar_bot:
-    name: '3. Check-in a Publica en AA'
+  publicar_bots:
+    name: '3. Check-in de todos los bots a Publica'
     runs-on: ubuntu-latest
     needs:
-      - exportar_bot
+      - analizar_bots
       - notificar_lider
-    if: ${{ needs.exportar_bot.outputs.total_critical == '0' && needs.exportar_bot.outputs.total_high == '0' && needs.exportar_bot.outputs.credential_violations == '0' }}
+    if: ${{ needs.analizar_bots.outputs.gate_ok == 'true' }}
 
     steps:
-      - name: Check-in del bot a carpeta Publica
+      - name: Check-in de todos los bots a Publica
         env:
           AA_URL:           ${{ secrets.AA_URL }}
           AA_USERNAME:      ${{ secrets.AA_USERNAME }}
           AA_API_KEY:       ${{ secrets.AA_API_KEY }}
           AA_AUTH_ENDPOINT: ${{ secrets.AA_AUTH_ENDPOINT }}
-          BOT_ID:           ${{ needs.exportar_bot.outputs.bot_id }}
-          BOT_NOMBRE:       ${{ needs.exportar_bot.outputs.bot_nombre }}
+          BOT_IDS_JSON:     ${{ needs.analizar_bots.outputs.bot_ids_json }}
         run: |
           python3 - << 'PYEOF'
           import json, urllib.request, ssl, os, sys
@@ -816,8 +701,7 @@ jobs:
           username = os.environ["AA_USERNAME"]
           api_key  = os.environ["AA_API_KEY"]
           endpoint = os.environ.get("AA_AUTH_ENDPOINT", "/v2/authentication")
-          bot_id   = os.environ["BOT_ID"]
-          bot_name = os.environ["BOT_NOMBRE"]
+          bot_ids  = json.loads(os.environ["BOT_IDS_JSON"])
 
           ctx = ssl.create_default_context()
 
@@ -830,17 +714,16 @@ jobs:
             with urllib.request.urlopen(req, context=ctx, timeout=30) as r:
               token = json.loads(r.read().decode("utf-8")).get("token", "")
           except Exception as e:
-            print(f"ERROR login: {e}")
-            sys.exit(1)
+            print(f"ERROR login: {e}"); sys.exit(1)
 
           hdrs = {"Content-Type": "application/json", "X-Authorization": token}
 
-          # PUT /v3/repository/checkin - capturado del Network del navegador
-          print(f"Haciendo check-in del bot ID {bot_id} a Publica...")
+          print(f"Haciendo check-in de {len(bot_ids)} bot(s): {bot_ids}")
 
+          # Un solo PUT con todos los IDs
           checkin_payload = json.dumps({
-            "ids": [str(bot_id)],
-            "comment": "Auto check-in DevSecOps pipeline"
+            "ids": [str(i) for i in bot_ids],
+            "comment": "Auto check-in DevSecOps pipeline - todos los bots aprobados"
           }).encode("utf-8")
 
           req = urllib.request.Request(
@@ -852,55 +735,50 @@ jobs:
           try:
             with urllib.request.urlopen(req, context=ctx, timeout=30) as r:
               resp = r.read().decode("utf-8")
-              print(f"[OK] Check-in exitoso -> Publica")
-              print(f"     Respuesta: {resp[:200]}")
+              print(f"[OK] Check-in exitoso para {len(bot_ids)} bot(s) -> Publica")
+              print(f"     Respuesta: {resp[:300]}")
           except urllib.error.HTTPError as e:
             body_err = e.read().decode("utf-8")
             print(f"ERROR HTTP {e.code}: {body_err[:300]}")
             sys.exit(1)
           except Exception as e:
-            print(f"ERROR: {e}")
-            sys.exit(1)
+            print(f"ERROR: {e}"); sys.exit(1)
           PYEOF
 
 # =================================================================
-# JOB RESUMEN: Siempre corre al final
+# JOB RESUMEN
 # =================================================================
   resumen:
     name: 'Resultado del pipeline'
     runs-on: ubuntu-latest
     needs:
-      - exportar_bot
+      - analizar_bots
       - notificar_lider
-      - publicar_bot
+      - publicar_bots
     if: always()
     steps:
       - name: Mostrar resultado
         env:
-          TOTAL_CRITICAL:        ${{ needs.exportar_bot.outputs.total_critical }}
-          TOTAL_HIGH:            ${{ needs.exportar_bot.outputs.total_high }}
-          CREDENTIAL_VIOLATIONS: ${{ needs.exportar_bot.outputs.credential_violations }}
-          BOT_NOMBRE:            ${{ needs.exportar_bot.outputs.bot_nombre }}
-          PUBLICAR_RESULT:       ${{ needs.publicar_bot.result }}
+          GATE_OK:        ${{ needs.analizar_bots.outputs.gate_ok }}
+          BOTS_COUNT:     ${{ needs.analizar_bots.outputs.bots_count }}
+          BOTS_FALLIDOS:  ${{ needs.analizar_bots.outputs.bots_fallidos }}
+          BOT_CARPETA:    ${{ github.event.inputs.bot_carpeta }}
+          PUBLICAR_RESULT: ${{ needs.publicar_bots.result }}
         run: |
           echo "============================================"
           echo "  RESULTADO FINAL - DevSecOps AA Pipeline"
           echo "============================================"
-          echo "Bot: $BOT_NOMBRE"
-          echo "Code Analysis Critical: $TOTAL_CRITICAL"
-          echo "Code Analysis High:     $TOTAL_HIGH"
-          echo "Credenciales expuestas: $CREDENTIAL_VIOLATIONS"
+          echo "Carpeta:          $BOT_CARPETA"
+          echo "Bots procesados:  $BOTS_COUNT"
+          echo "Bots fallidos:    $BOTS_FALLIDOS"
           echo "--------------------------------------------"
           if [ "$PUBLICAR_RESULT" = "success" ]; then
-            echo "[OK] BOT APROBADO Y PUBLICADO EN PUBLICA"
+            echo "[OK] TODOS LOS BOTS PUBLICADOS EN PUBLICA"
           elif [ "$PUBLICAR_RESULT" = "skipped" ]; then
-            echo "[RECHAZADO] BOT NO PASO A PUBLICA"
-            echo "Motivos:"
-            [ "$TOTAL_CRITICAL" -gt 0 ] 2>/dev/null && echo "  - $TOTAL_CRITICAL violation(es) Critical en Code Analysis"
-            [ "$TOTAL_HIGH" -gt 0 ] 2>/dev/null && echo "  - $TOTAL_HIGH violation(es) High en Code Analysis"
-            [ "$CREDENTIAL_VIOLATIONS" -gt 0 ] 2>/dev/null && echo "  - $CREDENTIAL_VIOLATIONS credencial(es) expuesta(s)"
-            echo "Revisa el correo enviado al lider para el detalle completo."
+            echo "[RECHAZADO] NINGÚN BOT PASO A PUBLICA"
+            echo "$BOTS_FALLIDOS de $BOTS_COUNT bots fallaron el gate."
+            echo "Revisa el correo del lider para el detalle."
           else
-            echo "[ERROR] El check-in a Publica fallo - revisa los logs"
+            echo "[ERROR] El check-in fallo - revisa los logs"
           fi
           echo "============================================"
