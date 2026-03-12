@@ -129,7 +129,8 @@ jobs:
                 print(f"  [WARN] Error buscando ID {bot_id}: {e}")
                 bots.append({"id": bot_id, "nombre": f"Bot_{bot_id}"})
           else:
-            # Modo carpeta por folder_id: filtrar por parentId en AA API
+            # Modo carpeta: GET /v2/repository/folders/{folder_id}
+            # Endpoint capturado del Network del navegador - GET sin payload
             if not folder_id:
               print("ERROR: Debes proporcionar bot_folder_id o bot_ids_manual")
               print("  El folder_id lo ves en la URL de AA: .../folders/1575863")
@@ -137,20 +138,23 @@ jobs:
 
             print(f"Modo carpeta: buscando bots en carpeta ID={folder_id} ({bot_folder})...")
             try:
-              payload = json.dumps({
-                "filter": {"operator": "eq", "field": "parentId", "value": folder_id},
-                "fields": ["id", "name", "path"],
-                "page": {"offset": 0, "length": 100}
-              }).encode("utf-8")
               req = urllib.request.Request(
-                aa_url + "/v2/repository/file/list", data=payload, headers=hdrs
+                aa_url + f"/v2/repository/folders/{folder_id}",
+                headers=hdrs,
+                method="GET"
               )
               with urllib.request.urlopen(req, context=ctx, timeout=30) as r:
-                items = json.loads(r.read().decode("utf-8")).get("list", [])
-                print(f"Bots encontrados en carpeta: {len(items)}")
+                resp = json.loads(r.read().decode("utf-8"))
+                # La respuesta trae los items de la carpeta
+                items = resp.get("list", resp.get("files", resp.get("items", [])))
+                print(f"Respuesta de la carpeta: {list(resp.keys())}")
+                print(f"Bots encontrados: {len(items)}")
                 for item in items:
-                  print(f"  ID: {item.get('id')} | Nombre: {item.get('name')} | Path: {item.get('path','')}")
-                  bots.append({"id": str(item["id"]), "nombre": item["name"]})
+                  item_id   = str(item.get("id", ""))
+                  item_name = item.get("name", "")
+                  print(f"  ID: {item_id} | Nombre: {item_name}")
+                  if item_id and item_name:
+                    bots.append({"id": item_id, "nombre": item_name})
             except urllib.error.HTTPError as e:
               body = e.read().decode("utf-8")
               print(f"ERROR HTTP {e.code}: {body[:300]}")
