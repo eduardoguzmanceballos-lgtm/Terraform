@@ -129,8 +129,8 @@ jobs:
                 print(f"  [WARN] Error buscando ID {bot_id}: {e}")
                 bots.append({"id": bot_id, "nombre": f"Bot_{bot_id}"})
           else:
-            # Modo carpeta: GET /v2/repository/folders/{folder_id}
-            # Endpoint capturado del Network del navegador - GET sin payload
+            # Modo carpeta: POST /v2/repository/folders/{folder_id}/list
+            # Endpoint capturado del Network del navegador
             if not folder_id:
               print("ERROR: Debes proporcionar bot_folder_id o bot_ids_manual")
               print("  El folder_id lo ves en la URL de AA: .../folders/1575863")
@@ -138,23 +138,33 @@ jobs:
 
             print(f"Modo carpeta: buscando bots en carpeta ID={folder_id} ({bot_folder})...")
             try:
+              payload = json.dumps({
+                "fields": [],
+                "filter": None,
+                "page": {"offset": 0, "length": 100},
+                "sort": [
+                  {"field": "directory", "direction": "desc"},
+                  {"field": "type", "direction": "desc"},
+                  {"field": "name", "direction": "asc"}
+                ]
+              }).encode("utf-8")
               req = urllib.request.Request(
-                aa_url + f"/v2/repository/folders/{folder_id}",
-                headers=hdrs,
-                method="GET"
+                aa_url + f"/v2/repository/folders/{folder_id}/list",
+                data=payload, headers=hdrs, method="POST"
               )
               with urllib.request.urlopen(req, context=ctx, timeout=30) as r:
                 resp = json.loads(r.read().decode("utf-8"))
-                # La respuesta trae los items de la carpeta
-                items = resp.get("list", resp.get("files", resp.get("items", [])))
-                print(f"Respuesta de la carpeta: {list(resp.keys())}")
-                print(f"Bots encontrados: {len(items)}")
+                items = resp.get("list", [])
+                print(f"Items encontrados en carpeta: {len(items)}")
                 for item in items:
                   item_id   = str(item.get("id", ""))
                   item_name = item.get("name", "")
-                  print(f"  ID: {item_id} | Nombre: {item_name}")
-                  if item_id and item_name:
+                  item_type = item.get("type", item.get("fileType", ""))
+                  print(f"  ID: {item_id} | Nombre: {item_name} | Tipo: {item_type}")
+                  # Excluir subcarpetas (type = directory/folder), incluir bots
+                  if item_id and item_name and "folder" not in item_type.lower() and "directory" not in item_type.lower():
                     bots.append({"id": item_id, "nombre": item_name})
+                    print(f"  [OK] Bot incluido: {item_name}")
             except urllib.error.HTTPError as e:
               body = e.read().decode("utf-8")
               print(f"ERROR HTTP {e.code}: {body[:300]}")
