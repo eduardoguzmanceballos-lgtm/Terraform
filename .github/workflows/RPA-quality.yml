@@ -777,7 +777,7 @@ jobs:
           elif [ "$PUBLICAR_RESULT" = "skipped" ]; then
             echo "[RECHAZADO] NINGÚN BOT PASO A PUBLICA"
             echo "$BOTS_FALLIDOS de $BOTS_COUNT bots fallaron el gate."
-            echo "Revisa el correo del lider para el detalle."
+            echo "Revisa el correo para mayor detalle."
           else
             echo "[ERROR] El check-in fallo - revisa los logs"
           fi
