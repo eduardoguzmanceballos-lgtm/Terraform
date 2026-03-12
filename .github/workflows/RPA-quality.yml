@@ -26,11 +26,16 @@ on:
   workflow_dispatch:
     inputs:
       bot_carpeta:
-        description: 'Carpeta del bot en AA Privada (ej: Bots/DevSecOps)'
+        description: 'Nombre de la carpeta (para mostrar en el reporte, ej: Bots/DevSecOps)'
         required: true
         type: string
+      bot_folder_id:
+        description: 'ID de la carpeta en AA (lo ves en la URL: .../folders/1575863)'
+        required: false
+        type: string
+        default: ''
       bot_ids_manual:
-        description: 'IDs de bots separados por coma (opcional - si no se llena, procesa toda la carpeta)'
+        description: 'IDs de bots separados por coma (opcional - si se llena, ignora la carpeta)'
         required: false
         type: string
         default: ''
@@ -57,6 +62,7 @@ jobs:
           AA_API_KEY:       ${{ secrets.AA_API_KEY }}
           AA_AUTH_ENDPOINT: ${{ secrets.AA_AUTH_ENDPOINT }}
           BOT_CARPETA:      ${{ github.event.inputs.bot_carpeta }}
+          BOT_FOLDER_ID:    ${{ github.event.inputs.bot_folder_id }}
           BOT_IDS_MANUAL:   ${{ github.event.inputs.bot_ids_manual }}
         run: |
           python3 - << 'PYEOF'
@@ -67,6 +73,7 @@ jobs:
           api_key    = os.environ["AA_API_KEY"]
           endpoint   = os.environ.get("AA_AUTH_ENDPOINT", "/v2/authentication")
           bot_folder = os.environ["BOT_CARPETA"]
+          folder_id  = os.environ.get("BOT_FOLDER_ID", "").strip()
           ids_manual = os.environ.get("BOT_IDS_MANUAL", "").strip()
 
           ctx = ssl.create_default_context()
@@ -122,18 +129,17 @@ jobs:
                 print(f"  [WARN] Error buscando ID {bot_id}: {e}")
                 bots.append({"id": bot_id, "nombre": f"Bot_{bot_id}"})
           else:
-            # Modo carpeta: listar todos los bots de esa carpeta
-            print(f"Modo carpeta: buscando bots en '{bot_folder}'...")
+            # Modo carpeta por folder_id: filtrar por parentId en AA API
+            if not folder_id:
+              print("ERROR: Debes proporcionar bot_folder_id o bot_ids_manual")
+              print("  El folder_id lo ves en la URL de AA: .../folders/1575863")
+              sys.exit(1)
+
+            print(f"Modo carpeta: buscando bots en carpeta ID={folder_id} ({bot_folder})...")
             try:
               payload = json.dumps({
-                "filter": {
-                  "operator": "and",
-                  "operands": [
-                    {"operator": "substring", "field": "path", "value": bot_folder},
-                    {"operator": "eq", "field": "workspaceType", "value": "PRIVATE"}
-                  ]
-                },
-                "fields": ["id", "name", "path", "workspaceType", "fileType"],
+                "filter": {"operator": "eq", "field": "parentId", "value": folder_id},
+                "fields": ["id", "name", "path"],
                 "page": {"offset": 0, "length": 100}
               }).encode("utf-8")
               req = urllib.request.Request(
@@ -141,41 +147,21 @@ jobs:
               )
               with urllib.request.urlopen(req, context=ctx, timeout=30) as r:
                 items = json.loads(r.read().decode("utf-8")).get("list", [])
-                print(f"Items encontrados en carpeta: {len(items)}")
+                print(f"Bots encontrados en carpeta: {len(items)}")
                 for item in items:
-                  print(f"  ID: {item.get('id')} | Nombre: {item.get('name')} | Path: {item.get('path')} | Tipo: {item.get('fileType','?')}")
-                  # Incluir solo bots (taskbot), excluir carpetas y otros archivos
-                  file_type = item.get("fileType", "").lower()
-                  if "bot" in file_type or "task" in file_type or file_type == "":
-                    bots.append({"id": str(item["id"]), "nombre": item["name"]})
+                  print(f"  ID: {item.get('id')} | Nombre: {item.get('name')} | Path: {item.get('path','')}")
+                  bots.append({"id": str(item["id"]), "nombre": item["name"]})
             except urllib.error.HTTPError as e:
               body = e.read().decode("utf-8")
               print(f"ERROR HTTP {e.code}: {body[:300]}")
-              # Fallback: buscar sin filtro de workspaceType (por si AA devuelve UNKNOWN)
-              print("Intentando sin filtro de workspaceType...")
-              try:
-                payload = json.dumps({
-                  "filter": {"operator": "substring", "field": "path", "value": bot_folder},
-                  "fields": ["id", "name", "path", "workspaceType", "fileType"],
-                  "page": {"offset": 0, "length": 100}
-                }).encode("utf-8")
-                req = urllib.request.Request(
-                  aa_url + "/v2/repository/file/list", data=payload, headers=hdrs
-                )
-                with urllib.request.urlopen(req, context=ctx, timeout=30) as r:
-                  items = json.loads(r.read().decode("utf-8")).get("list", [])
-                  print(f"Items encontrados (fallback): {len(items)}")
-                  for item in items:
-                    print(f"  ID: {item.get('id')} | Nombre: {item.get('name')} | Workspace: {item.get('workspaceType','?')}")
-                    bots.append({"id": str(item["id"]), "nombre": item["name"]})
-              except Exception as e2:
-                print(f"ERROR fallback: {e2}"); sys.exit(1)
+              sys.exit(1)
             except Exception as e:
-              print(f"ERROR listando carpeta: {e}"); sys.exit(1)
+              print(f"ERROR listando carpeta: {e}")
+              sys.exit(1)
 
           if not bots:
-            print(f"ERROR: No se encontraron bots en '{bot_folder}'")
-            print("  Verifica que la carpeta existe y tiene bots en AA Privada")
+            print(f"ERROR: No se encontraron bots en la carpeta ID={folder_id} ({bot_folder})")
+            print("  Verifica que el folder_id es correcto y la carpeta tiene bots en AA Privada")
             sys.exit(1)
 
           print(f"\nBots a procesar: {len(bots)}")
