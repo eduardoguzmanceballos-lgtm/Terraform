@@ -86,13 +86,13 @@ jobs:
 
       - name: Summary — Gate 1 Quality
         run: |
-          echo "## ✅ Gate 1 — Quality" >> $GITHUB_STEP_SUMMARY
+          echo "# 🛫 IaC Governance Gate" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Check | Estado |" >> $GITHUB_STEP_SUMMARY
-          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
-          echo "| Terraform init | ✅ Paso |" >> $GITHUB_STEP_SUMMARY
-          echo "| Terraform validate | ✅ Paso |" >> $GITHUB_STEP_SUMMARY
+          echo "> **Destino:** \`${{ github.event.inputs.location }}\` &nbsp;|&nbsp; **VM:** \`${{ github.event.inputs.vm_size }}\` &nbsp;|&nbsp; **$(date -u '+%Y-%m-%d %H:%M UTC')**" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
+          echo "⚡ Iniciando secuencia de gobierno — este avión no despega sin autorización." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "---" >> $GITHUB_STEP_SUMMARYY
 
       # ─────────────────────────────────────────
       # GATE 2 — SECURITY (CHECKOV)
