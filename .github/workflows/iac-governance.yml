@@ -4,26 +4,21 @@ on:
   workflow_dispatch:
     inputs:
       location:
-        description: "Azure location (eastus, westus2, brazilsouth)"
+        description: "Azure location (example: eastus, westus2)"
         required: true
         default: "eastus"
-        type: choice
-        options:
-          - "eastus"
-          - "westus2"
-          - "brazilsouth"
       vm_size:
-        description: "VM size"
+        description: "VM size (example: Standard_B2s)"
         required: true
         default: "Standard_B2s"
       break_tags:
-        description: "Simular fallo de tags (demo)"
+        description: "Set to true to intentionally fail governance"
         required: false
         default: "false"
-        type: choice
-        options:
-          - "false"
-          - "true"
+      run_plan:
+        description: "Set to true to run terraform plan"
+        required: false
+        default: "false"
 
 permissions:
   contents: read
