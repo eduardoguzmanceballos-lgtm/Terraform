@@ -4,21 +4,26 @@ on:
   workflow_dispatch:
     inputs:
       location:
-        description: "Azure location (example: eastus, westus2)"
+        description: "Azure location"
         required: true
         default: "eastus"
+        type: choice
+        options:
+          - "eastus"
+          - "westus2"
+          - "brazilsouth"
       vm_size:
-        description: "VM size (example: Standard_B2s)"
+        description: "VM size"
         required: true
         default: "Standard_B2s"
       break_tags:
-        description: "Set to true to intentionally fail governance"
+        description: "Simular fallo de tags"
         required: false
         default: "false"
-      run_plan:
-        description: "Set to true to run terraform plan"
-        required: false
-        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
 
 permissions:
   contents: read
@@ -45,13 +50,9 @@ jobs:
         run: |
           echo "# 🛫 IaC Governance Gate" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Detalle | Valor |" >> $GITHUB_STEP_SUMMARY
-          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
-          echo "| Repositorio | \`${{ github.repository }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| Branch | \`${{ github.ref_name }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| Fecha | $(date -u '+%Y-%m-%d %H:%M UTC') |" >> $GITHUB_STEP_SUMMARY
-          echo "| Location | \`${{ github.event.inputs.location }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| VM Size | \`${{ github.event.inputs.vm_size }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "> **Destino:** \`${{ github.event.inputs.location }}\` &nbsp;|&nbsp; **VM:** \`${{ github.event.inputs.vm_size }}\` &nbsp;|&nbsp; **$(date -u '+%Y-%m-%d %H:%M UTC')**" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "⚡ Iniciando secuencia de gobierno — este avión no despega sin autorización." >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "---" >> $GITHUB_STEP_SUMMARY
 
@@ -81,13 +82,13 @@ jobs:
 
       - name: Summary — Gate 1 Quality
         run: |
-          echo "# 🛫 IaC Governance Gate" >> $GITHUB_STEP_SUMMARY
+          echo "## ✅ Gate 1 — Quality" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "> **Destino:** \`${{ github.event.inputs.location }}\` &nbsp;|&nbsp; **VM:** \`${{ github.event.inputs.vm_size }}\` &nbsp;|&nbsp; **$(date -u '+%Y-%m-%d %H:%M UTC')**" >> $GITHUB_STEP_SUMMARY
+          echo "| Check | Estado |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| Terraform init | ✅ Paso |" >> $GITHUB_STEP_SUMMARY
+          echo "| Terraform validate | ✅ Paso |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "⚡ Iniciando secuencia de gobierno — este avión no despega sin autorización." >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "---" >> $GITHUB_STEP_SUMMARYY
 
       # ─────────────────────────────────────────
       # GATE 2 — SECURITY (CHECKOV)
@@ -173,8 +174,7 @@ jobs:
 
       # ─────────────────────────────────────────
       # GATE 3 — COST (INFRACOST)
-      # continue-on-error: true para que Gate 4
-      # siempre corra aunque el costo falle
+      # continue-on-error para que Gate 4 siempre corra
       # ─────────────────────────────────────────
       - name: Setup Infracost
         uses: infracost/actions/setup@v3
@@ -246,8 +246,7 @@ jobs:
 
       # ─────────────────────────────────────────
       # GATE 4 — GOVERNANCE (analyze_plan.py)
-      # Siempre corre — genera el semaforo final
-      # con la analogia del aeropuerto
+      # Siempre corre — semaforo final
       # ─────────────────────────────────────────
       - name: Gate 4 — IaC Governance
         run: |
