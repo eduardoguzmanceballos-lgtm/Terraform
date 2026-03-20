@@ -121,18 +121,3 @@ resource "azurerm_linux_virtual_machine" "vm" {
     version   = "latest"
   }
 }
-
-# -----------------------------
-# Outputs (useful for demo)
-# -----------------------------
-output "demo_region" {
-  value = azurerm_resource_group.rg.location
-}
-
-output "demo_vm_size" {
-  value = azurerm_linux_virtual_machine.vm.size
-}
-
-output "demo_public_ip_id" {
-  value = azurerm_public_ip.pip.id
-}
