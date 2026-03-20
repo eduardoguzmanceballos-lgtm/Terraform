@@ -1,0 +1,268 @@
+name: quality-gate
+
+on:
+  workflow_dispatch:
+    inputs:
+      location:
+        description: "Azure location (eastus, westus2, brazilsouth)"
+        required: true
+        default: "eastus"
+        type: choice
+        options:
+          - "eastus"
+          - "westus2"
+          - "brazilsouth"
+      vm_size:
+        description: "VM size"
+        required: true
+        default: "Standard_B2s"
+      break_tags:
+        description: "Simular fallo de tags (demo)"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  terraform-plan-gate:
+    runs-on: ubuntu-latest
+
+    env:
+      ARM_CLIENT_ID:       ${{ secrets.AZURE_CLIENT_ID }}
+      ARM_CLIENT_SECRET:   ${{ secrets.AZURE_CLIENT_SECRET }}
+      ARM_TENANT_ID:       ${{ secrets.AZURE_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ─────────────────────────────────────────
+      # HEADER DEL SUMMARY
+      # ─────────────────────────────────────────
+      - name: Summary — inicio
+        run: |
+          echo "# 🛫 IaC Governance Gate" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Detalle | Valor |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| Repositorio | \`${{ github.repository }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Branch | \`${{ github.ref_name }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Fecha | $(date -u '+%Y-%m-%d %H:%M UTC') |" >> $GITHUB_STEP_SUMMARY
+          echo "| Location | \`${{ github.event.inputs.location }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| VM Size | \`${{ github.event.inputs.vm_size }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "---" >> $GITHUB_STEP_SUMMARY
+
+      # ─────────────────────────────────────────
+      # SECRET SCANNING
+      # ─────────────────────────────────────────
+      - name: Secret scanning (Gitleaks)
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # ─────────────────────────────────────────
+      # SETUP TERRAFORM
+      # ─────────────────────────────────────────
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.6.6
+
+      - name: Terraform Init
+        working-directory: azuredemo/terraform
+        run: terraform init -upgrade
+
+      - name: Terraform Validate
+        working-directory: azuredemo/terraform
+        run: terraform validate
+
+      - name: Summary — quality gate
+        run: |
+          echo "## ✅ Quality Gate" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Check | Estado |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| Terraform init | ✅ Paso |" >> $GITHUB_STEP_SUMMARY
+          echo "| Terraform validate | ✅ Paso |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+      # ─────────────────────────────────────────
+      # SECURITY GATE — CHECKOV
+      # ─────────────────────────────────────────
+      - name: Install Checkov
+        run: pip3 install -q checkov
+
+      - name: Checkov scan (JSON)
+        working-directory: azuredemo/terraform
+        run: |
+          set +e
+          checkov -d . --framework terraform \
+            -o json > checkov-results.json
+          exit 0
+
+      - name: Summary — security gate
+        run: |
+          python3 - <<'PY'
+          import json, os
+
+          summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+          if not summary_path:
+              raise SystemExit(0)
+
+          try:
+              with open("azuredemo/terraform/checkov-results.json", "r") as f:
+                  data = json.load(f)
+          except Exception:
+              with open(summary_path, "a") as s:
+                  s.write("## 🔐 Security Gate (Checkov)\n\n⚠️ No se pudo leer el resultado.\n\n")
+              raise SystemExit(0)
+
+          results = data.get("results", {})
+          failed  = results.get("failed_checks", []) or []
+          passed  = results.get("passed_checks", []) or []
+          total   = len(failed) + len(passed)
+
+          lines = []
+          lines.append("## 🔐 Security Gate (Checkov)\n")
+          lines.append("| Metrica | Valor |")
+          lines.append("|---|---|")
+          lines.append(f"| Total checks | **{total}** |")
+          lines.append(f"| Pasaron | ✅ **{len(passed)}** |")
+          lines.append(f"| Fallaron | {'❌' if failed else '✅'} **{len(failed)}** |")
+          lines.append("")
+
+          if failed:
+              lines.append("### Findings (top 5)")
+              lines.append("| Check ID | Recurso | Mensaje |")
+              lines.append("|---|---|---|")
+              for f in failed[:5]:
+                  cid = f.get("check_id", "")
+                  res = f.get("resource", "")
+                  msg = (f.get("check_name","") or "").replace("\n"," ").strip()
+                  lines.append(f"| `{cid}` | `{res}` | {msg} |")
+          else:
+              lines.append("✅ Sin findings de seguridad.")
+          lines.append("")
+
+          with open(summary_path, "a") as s:
+              s.write("\n".join(lines) + "\n")
+          PY
+
+      # ─────────────────────────────────────────
+      # TERRAFORM PLAN
+      # ─────────────────────────────────────────
+      - name: Terraform Plan
+        working-directory: azuredemo/terraform
+        env:
+          TF_VAR_location: ${{ github.event.inputs.location }}
+          TF_VAR_vm_size:  ${{ github.event.inputs.vm_size }}
+          TF_VAR_tags: >-
+            {"owner":"eduardo","costCenter":"demo","environment":"dev","application":"iac-governance"}
+        run: |
+          if [ "${{ github.event.inputs.break_tags }}" = "true" ]; then
+            export TF_VAR_tags='{"owner":"eduardo","environment":"dev","application":"iac-governance"}'
+          fi
+          terraform plan -out=tfplan
+
+      - name: Export plan to JSON
+        working-directory: azuredemo/terraform
+        run: terraform show -json tfplan > tfplan.json
+
+      # ─────────────────────────────────────────
+      # COST GATE — INFRACOST
+      # ─────────────────────────────────────────
+      - name: Setup Infracost
+        uses: infracost/actions/setup@v3
+        with:
+          api-key: ${{ secrets.INFRACOST_API_KEY }}
+
+      - name: Infracost breakdown
+        working-directory: azuredemo/terraform
+        run: |
+          infracost breakdown \
+            --path=tfplan.json \
+            --format=json \
+            --out-file=infracost.json
+
+      - name: Summary — cost gate
+        working-directory: azuredemo/terraform
+        env:
+          MAX_MONTHLY_USD: "50"
+        run: |
+          python3 - <<'PY'
+          import json, os, sys
+
+          max_cost     = float(os.environ.get("MAX_MONTHLY_USD", "50"))
+          summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+
+          with open("infracost.json") as f:
+              data = json.load(f)
+
+          cost = data.get("totalMonthlyCost")
+          if cost is None:
+              print("⚠️ No se pudo leer totalMonthlyCost")
+              sys.exit(0)
+
+          cost   = float(cost)
+          passed = cost <= max_cost
+
+          lines = []
+          lines.append("## 💸 Cost Gate (Infracost)\n")
+          lines.append("| Metrica | Valor |")
+          lines.append("|---|---|")
+          lines.append(f"| Costo estimado mensual | **${cost:.2f} USD** |")
+          lines.append(f"| Limite permitido | **${max_cost:.2f} USD** |")
+          lines.append(f"| Estado | {'✅ Dentro del presupuesto' if passed else '❌ Excede el presupuesto'} |")
+          lines.append("")
+
+          projects = data.get("projects", [])
+          if projects:
+              lines.append("### Recursos con costo")
+              lines.append("| Recurso | Costo mensual |")
+              lines.append("|---|---|")
+              for p in projects:
+                  for r in (p.get("breakdown", {}).get("resources", []) or []):
+                      rc = float(r.get("monthlyCost") or 0)
+                      if rc > 0:
+                          lines.append(f"| `{r.get('name','')}` | ${rc:.2f} |")
+          lines.append("")
+
+          if summary_path:
+              with open(summary_path, "a") as s:
+                  s.write("\n".join(lines) + "\n")
+
+          if not passed:
+              print(f"❌ Costo excede el limite ({max_cost} USD)")
+              sys.exit(1)
+
+          print(f"✅ Cost policy passed — ${cost:.2f}/mes")
+          PY
+
+      # ─────────────────────────────────────────
+      # GOVERNANCE GATE — analyze_plan.py
+      # ─────────────────────────────────────────
+      - name: IaC Governance Gate
+        run: |
+          python3 azuredemo/scripts/analyze_plan.py \
+            azuredemo/terraform/tfplan.json
+
+      # ─────────────────────────────────────────
+      # ARTIFACTS — evidencia
+      # ─────────────────────────────────────────
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: iac-governance-evidencia
+          path: |
+            azuredemo/terraform/tfplan.json
+            azuredemo/terraform/infracost.json
+            azuredemo/terraform/checkov-results.json
