@@ -1,4 +1,4 @@
-name: quality-gate
+name: iac-governance-demo
 
 on:
   workflow_dispatch:
