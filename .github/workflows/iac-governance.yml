@@ -7,11 +7,11 @@ on:
         description: "Region de Azure (ej: eastus, westus2)"
         required: true
         default: "eastus"
-        type: choice
-        options:
-          - "eastus"
-          - "westus2"
-          - "brazilsouth"
+        #type: choice
+        #options:
+         # - "eastus"
+          #- "westus2"
+          #- "brazilsouth"
       vm_size:
         description: "Tamaño de la VM (ej: Standard_B2s, Standard_D2s_v3)"
         required: true
