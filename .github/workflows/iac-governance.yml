@@ -199,7 +199,7 @@ jobs:
         continue-on-error: true
         working-directory: azuredemo/terraform
         env:
-          MAX_MONTHLY_USD: "100"
+          MAX_MONTHLY_USD: "50"
         run: |
           python3 - <<'PY'
           import json, os, sys
