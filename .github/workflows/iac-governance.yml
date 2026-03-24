@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       location:
-        description: "Region de Azure (ej: eastus, westus2, brazilsouth)"
+        description: "Region de Azure (ej: eastus, westus2)"
         required: true
         default: "eastus"
         type: choice
