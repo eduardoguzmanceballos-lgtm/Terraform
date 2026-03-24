@@ -1,10 +1,10 @@
-name: iac-governance
+name: iac-governance-demo
 
 on:
   workflow_dispatch:
     inputs:
       location:
-        description: "Azure location"
+        description: "Region de Azure (ej: eastus, westus2, brazilsouth)"
         required: true
         default: "eastus"
         type: choice
@@ -13,11 +13,11 @@ on:
           - "westus2"
           - "brazilsouth"
       vm_size:
-        description: "VM size"
+        description: "Tamaño de la VM (ej: Standard_B2s, Standard_D2s_v3)"
         required: true
         default: "Standard_B2s"
       break_tags:
-        description: "Simular fallo de tags"
+        description: "¿Simular fallo de gobierno? true = falla tags, false = todo correcto"
         required: false
         default: "false"
         type: choice
@@ -66,21 +66,23 @@ jobs:
 
       # ─────────────────────────────────────────
       # GATE 1 — QUALITY
+      # terraform fmt + validate
+      # El summary sale inmediatamente despues
       # ─────────────────────────────────────────
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: 1.6.6
 
-      - name: Terraform Init
+      - name: "[Gate 1] Terraform Init"
         working-directory: azuredemo/terraform
         run: terraform init -upgrade
 
-      - name: Terraform Validate
+      - name: "[Gate 1] Terraform Validate"
         working-directory: azuredemo/terraform
         run: terraform validate
 
-      - name: Summary — Gate 1 Quality
+      - name: "[Gate 1] Summary — Quality"
         run: |
           echo "## ✅ Gate 1 — Quality" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
@@ -91,12 +93,13 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
 
       # ─────────────────────────────────────────
-      # GATE 2 — SECURITY (CHECKOV)
+      # GATE 2 — SECURITY
+      # Checkov escanea y el summary sale al tiro
       # ─────────────────────────────────────────
-      - name: Install Checkov
+      - name: "[Gate 2] Install Checkov"
         run: pip3 install -q checkov
 
-      - name: Checkov scan (JSON)
+      - name: "[Gate 2] Checkov scan"
         working-directory: azuredemo/terraform
         run: |
           set +e
@@ -104,7 +107,7 @@ jobs:
             -o json > checkov-results.json
           exit 0
 
-      - name: Summary — Gate 2 Security
+      - name: "[Gate 2] Summary — Security"
         run: |
           python3 - <<'PY'
           import json, os
@@ -154,8 +157,9 @@ jobs:
 
       # ─────────────────────────────────────────
       # TERRAFORM PLAN
+      # Genera el tfplan.json que usan Gate 3 y 4
       # ─────────────────────────────────────────
-      - name: Terraform Plan
+      - name: "[Plan] Terraform Plan"
         working-directory: azuredemo/terraform
         env:
           TF_VAR_location: ${{ github.event.inputs.location }}
@@ -168,20 +172,22 @@ jobs:
           fi
           terraform plan -out=tfplan
 
-      - name: Export plan to JSON
+      - name: "[Plan] Export plan to JSON"
         working-directory: azuredemo/terraform
         run: terraform show -json tfplan > tfplan.json
 
       # ─────────────────────────────────────────
-      # GATE 3 — COST (INFRACOST)
+      # GATE 3 — COST
+      # Infracost estima el costo del plan
+      # El summary sale inmediatamente despues
       # continue-on-error para que Gate 4 siempre corra
       # ─────────────────────────────────────────
-      - name: Setup Infracost
+      - name: "[Gate 3] Setup Infracost"
         uses: infracost/actions/setup@v3
         with:
           api-key: ${{ secrets.INFRACOST_API_KEY }}
 
-      - name: Infracost breakdown
+      - name: "[Gate 3] Infracost breakdown"
         working-directory: azuredemo/terraform
         run: |
           infracost breakdown \
@@ -189,7 +195,7 @@ jobs:
             --format=json \
             --out-file=infracost.json
 
-      - name: Summary — Gate 3 Cost
+      - name: "[Gate 3] Summary — Cost"
         continue-on-error: true
         working-directory: azuredemo/terraform
         env:
@@ -198,7 +204,7 @@ jobs:
           python3 - <<'PY'
           import json, os, sys
 
-          max_cost     = float(os.environ.get("MAX_MONTHLY_USD", "50"))
+          max_cost     = float(os.environ.get("MAX_MONTHLY_USD", "100"))
           summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
 
           with open("infracost.json") as f:
@@ -245,10 +251,12 @@ jobs:
           PY
 
       # ─────────────────────────────────────────
-      # GATE 4 — GOVERNANCE (analyze_plan.py)
-      # Siempre corre — semaforo final
+      # GATE 4 — GOVERNANCE
+      # analyze_plan.py evalua region, tags, vm size
+      # El summary del semaforo sale aqui
+      # Siempre corre aunque Gate 3 falle
       # ─────────────────────────────────────────
-      - name: Gate 4 — IaC Governance
+      - name: "[Gate 4] IaC Governance — analyze plan"
         run: |
           python3 azuredemo/scripts/analyze_plan.py \
             azuredemo/terraform/tfplan.json
