@@ -1,4 +1,4 @@
-name: iac-governance-demo
+name: iac-governance
 
 on:
   workflow_dispatch:
