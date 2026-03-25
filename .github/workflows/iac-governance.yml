@@ -11,7 +11,7 @@ on:
         #options:
          # - "eastus"
           #- "westus2"
-          #- "brazilsouth"
+          #- "zilsoubrath"
       vm_size:
         description: "Tamaño de la VM (ej: Standard_B2s, Standard_D2s_v3)"
         required: true
@@ -182,24 +182,11 @@ jobs:
       # El summary sale inmediatamente despues
       # continue-on-error para que Gate 4 siempre corra
       # ─────────────────────────────────────────
-      - name: "[Gate 3] Setup Infracost"
-        uses: infracost/actions/setup@v3
-        with:
-          api-key: ${{ secrets.INFRACOST_API_KEY }}
-
-      - name: "[Gate 3] Infracost breakdown"
-        working-directory: azuredemo/terraform
-        run: |
-          infracost breakdown \
-            --path=tfplan.json \
-            --format=json \
-            --out-file=infracost.json
-
       - name: "[Gate 3] Summary — Cost"
         continue-on-error: true
         working-directory: azuredemo/terraform
         env:
-          MAX_MONTHLY_USD: "100"
+          MAX_MONTHLY_USD: "50"
         run: |
           python3 - <<'PY'
           import json, os, sys
@@ -218,8 +205,16 @@ jobs:
           cost   = float(cost)
           passed = cost <= max_cost
 
+          # ── Resumen general ──────────────────
+          summary_data = data.get("summary", {})
+          free_count   = summary_data.get("totalFreeResources", 0)
+          paid_count   = summary_data.get("totalPaidResources", 0)
+          total_res    = free_count + paid_count
+
           lines = []
           lines.append("## 💸 Gate 3 — Cost (Infracost)\n")
+
+          # Estado del gate
           lines.append("| Metrica | Valor |")
           lines.append("|---|---|")
           lines.append(f"| Costo estimado mensual | **${cost:.2f} USD** |")
@@ -227,32 +222,46 @@ jobs:
           lines.append(f"| Estado | {'✅ Dentro del presupuesto' if passed else '❌ Excede el presupuesto'} |")
           lines.append("")
 
-          # Recursos de pago
+          # Resumen de recursos
+          lines.append("### 📊 Resumen de recursos")
+          lines.append("| Tipo | Cantidad |")
+          lines.append("|---|---|")
+          lines.append(f"| 💰 De pago | **{paid_count}** |")
+          lines.append(f"| 🆓 Gratis | **{free_count}** |")
+          lines.append(f"| 📦 Total | **{total_res}** |")
+          lines.append("")
+
+          # Detalle de recursos de pago con componentes
           projects = data.get("projects", [])
           if projects:
-              lines.append("### 💰 Recursos de pago")
-              lines.append("| Recurso | Detalle | Costo mensual |")
+              lines.append("### 💰 Detalle de recursos de pago")
+              lines.append("| Recurso | Componente | Costo mensual |")
               lines.append("|---|---|---|")
               for p in projects:
                   for r in (p.get("breakdown", {}).get("resources", []) or []):
                       rc = float(r.get("monthlyCost") or 0)
                       if rc > 0:
                           name = r.get("name", "")
-                          for comp in (r.get("costComponents") or []):
-                              cc = float(comp.get("monthlyCost") or 0)
-                              if cc > 0:
-                                  desc = comp.get("name", "")
-                                  lines.append(f"| `{name}` | {desc} | ${cc:.2f} |")
+                          components = r.get("costComponents") or []
+                          if components:
+                              for comp in components:
+                                  cc = float(comp.get("monthlyCost") or 0)
+                                  if cc > 0:
+                                      desc = comp.get("name", "")
+                                      lines.append(f"| `{name}` | {desc} | ${cc:.2f} |")
+                          else:
+                              lines.append(f"| `{name}` | — | ${rc:.2f} |")
 
-              lines.append("")
-              lines.append("### 🆓 Recursos gratis")
-              lines.append("| Recurso |")
-              lines.append("|---|")
-              for p in projects:
-                  for r in (p.get("breakdown", {}).get("resources", []) or []):
-                      rc = float(r.get("monthlyCost") or 0)
-                      if rc == 0:
-                          lines.append(f"| `{r.get('name','')}` |")
+                          # Sub recursos (ej: os_disk dentro de la VM)
+                          for sub in (r.get("subresources") or []):
+                              src = float(sub.get("monthlyCost") or 0)
+                              if src > 0:
+                                  sname = sub.get("name", "")
+                                  for comp in (sub.get("costComponents") or []):
+                                      cc = float(comp.get("monthlyCost") or 0)
+                                      if cc > 0:
+                                          desc = comp.get("name", "")
+                                          lines.append(f"| `{name}` | {sname} — {desc} | ${cc:.2f} |")
           lines.append("")
 
           if summary_path:
