@@ -1,17 +1,16 @@
-name: iac-governance-demo
-
+name: iac-governance
 on:
   workflow_dispatch:
     inputs:
       location:
-        description: "Region de Azure (ej: eastus, westus2, brazilsouth)"
+        description: "Region de Azure (ej: eastus, westus2)"
         required: true
         default: "eastus"
-        type: choice
-        options:
-          - "eastus"
-          - "westus2"
-          - "brazilsouth"
+        # type: choice
+        # options:
+        #   - "eastus"
+        #   - "westus2"
+        #   - "brazilsouth"
       vm_size:
         description: "Tamaño de la VM (ej: Standard_B2s, Standard_D2s_v3)"
         required: true
@@ -217,11 +216,17 @@ jobs:
           cost     = float(cost_raw) if cost_raw else 0.0
           passed   = cost <= max_cost
 
-          # Conteo de recursos
-          summary_data = data.get("summary", {})
-          free_count   = summary_data.get("totalFreeResources", 0)
-          paid_count   = summary_data.get("totalPaidResources", 0)
-          total_res    = free_count + paid_count
+          # Conteo de recursos directo del breakdown
+          paid_count = 0
+          free_count = 0
+          for p in data.get("projects", []):
+              for r in (p.get("breakdown", {}).get("resources", []) or []):
+                  rc = float(r.get("monthlyCost") or 0)
+                  if rc > 0:
+                      paid_count += 1
+                  else:
+                      free_count += 1
+          total_res = paid_count + free_count
 
           lines = []
           lines.append("## 💸 Gate 3 — Cost (Infracost)\n")
