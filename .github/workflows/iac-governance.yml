@@ -4,14 +4,14 @@ on:
   workflow_dispatch:
     inputs:
       location:
-        description: "Region de Azure (ej: eastus, westus2)"
+        description: "Region de Azure (ej: eastus, westus2, brazilsouth)"
         required: true
         default: "eastus"
-        #type: choice
-        #options:
-         # - "eastus"
-          #- "westus2"
-          #- "zilsoubrath"
+        type: choice
+        options:
+          - "eastus"
+          - "westus2"
+          - "brazilsouth"
       vm_size:
         description: "Tamaño de la VM (ej: Standard_B2s, Standard_D2s_v3)"
         required: true
@@ -66,8 +66,6 @@ jobs:
 
       # ─────────────────────────────────────────
       # GATE 1 — QUALITY
-      # terraform fmt + validate
-      # El summary sale inmediatamente despues
       # ─────────────────────────────────────────
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
@@ -93,8 +91,7 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
 
       # ─────────────────────────────────────────
-      # GATE 2 — SECURITY
-      # Checkov escanea y el summary sale al tiro
+      # GATE 2 — SECURITY (CHECKOV)
       # ─────────────────────────────────────────
       - name: "[Gate 2] Install Checkov"
         run: pip3 install -q checkov
@@ -157,7 +154,6 @@ jobs:
 
       # ─────────────────────────────────────────
       # TERRAFORM PLAN
-      # Genera el tfplan.json que usan Gate 3 y 4
       # ─────────────────────────────────────────
       - name: "[Plan] Terraform Plan"
         working-directory: azuredemo/terraform
@@ -177,11 +173,22 @@ jobs:
         run: terraform show -json tfplan > tfplan.json
 
       # ─────────────────────────────────────────
-      # GATE 3 — COST
-      # Infracost estima el costo del plan
-      # El summary sale inmediatamente despues
-      # continue-on-error para que Gate 4 siempre corra
+      # GATE 3 — COST (INFRACOST)
       # ─────────────────────────────────────────
+      - name: "[Gate 3] Setup Infracost"
+        uses: infracost/actions/setup@v3
+        with:
+          api-key: ${{ secrets.INFRACOST_API_KEY }}
+
+      - name: "[Gate 3] Infracost breakdown"
+        continue-on-error: true
+        working-directory: azuredemo/terraform
+        run: |
+          infracost breakdown \
+            --path=tfplan.json \
+            --format=json \
+            --out-file=infracost.json
+
       - name: "[Gate 3] Summary — Cost"
         continue-on-error: true
         working-directory: azuredemo/terraform
@@ -194,18 +201,23 @@ jobs:
           max_cost     = float(os.environ.get("MAX_MONTHLY_USD", "50"))
           summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
 
-          with open("infracost.json") as f:
-              data = json.load(f)
-
-          cost = data.get("totalMonthlyCost")
-          if cost is None:
-              print("⚠️ No se pudo leer totalMonthlyCost")
+          # Verificar que el archivo existe
+          try:
+              with open("infracost.json") as f:
+                  data = json.load(f)
+          except Exception as e:
+              print(f"⚠️ No se pudo leer infracost.json: {e}")
+              if summary_path:
+                  with open(summary_path, "a") as s:
+                      s.write("## 💸 Gate 3 — Cost (Infracost)\n\n⚠️ No se pudo estimar el costo.\n\n")
               sys.exit(0)
 
-          cost   = float(cost)
-          passed = cost <= max_cost
+          # Costo total
+          cost_raw = data.get("totalMonthlyCost")
+          cost     = float(cost_raw) if cost_raw else 0.0
+          passed   = cost <= max_cost
 
-          # ── Resumen general ──────────────────
+          # Conteo de recursos
           summary_data = data.get("summary", {})
           free_count   = summary_data.get("totalFreeResources", 0)
           paid_count   = summary_data.get("totalPaidResources", 0)
@@ -227,41 +239,43 @@ jobs:
           lines.append("| Tipo | Cantidad |")
           lines.append("|---|---|")
           lines.append(f"| 💰 De pago | **{paid_count}** |")
-          lines.append(f"| 🆓 Gratis | **{free_count}** |")
-          lines.append(f"| 📦 Total | **{total_res}** |")
+          lines.append(f"| 🆓 Gratis  | **{free_count}** |")
+          lines.append(f"| 📦 Total   | **{total_res}** |")
           lines.append("")
 
-          # Detalle de recursos de pago con componentes
+          # Detalle de recursos de pago
           projects = data.get("projects", [])
-          if projects:
-              lines.append("### 💰 Detalle de recursos de pago")
-              lines.append("| Recurso | Componente | Costo mensual |")
-              lines.append("|---|---|---|")
-              for p in projects:
-                  for r in (p.get("breakdown", {}).get("resources", []) or []):
-                      rc = float(r.get("monthlyCost") or 0)
-                      if rc > 0:
-                          name = r.get("name", "")
-                          components = r.get("costComponents") or []
-                          if components:
-                              for comp in components:
-                                  cc = float(comp.get("monthlyCost") or 0)
-                                  if cc > 0:
-                                      desc = comp.get("name", "")
-                                      lines.append(f"| `{name}` | {desc} | ${cc:.2f} |")
-                          else:
-                              lines.append(f"| `{name}` | — | ${rc:.2f} |")
+          found_paid = False
+          paid_lines = []
+          paid_lines.append("### 💰 Detalle de recursos de pago")
+          paid_lines.append("| Recurso | Componente | Costo mensual |")
+          paid_lines.append("|---|---|---|")
 
-                          # Sub recursos (ej: os_disk dentro de la VM)
-                          for sub in (r.get("subresources") or []):
-                              src = float(sub.get("monthlyCost") or 0)
-                              if src > 0:
-                                  sname = sub.get("name", "")
-                                  for comp in (sub.get("costComponents") or []):
-                                      cc = float(comp.get("monthlyCost") or 0)
-                                      if cc > 0:
-                                          desc = comp.get("name", "")
-                                          lines.append(f"| `{name}` | {sname} — {desc} | ${cc:.2f} |")
+          for p in projects:
+              resources = p.get("breakdown", {}).get("resources", []) or []
+              for r in resources:
+                  name = r.get("name", "")
+                  rc   = float(r.get("monthlyCost") or 0)
+                  if rc <= 0:
+                      continue
+                  found_paid = True
+                  # Componentes directos
+                  for comp in (r.get("costComponents") or []):
+                      cc = float(comp.get("monthlyCost") or 0)
+                      if cc > 0:
+                          paid_lines.append(f"| `{name}` | {comp.get('name','')} | ${cc:.2f} |")
+                  # Sub recursos (ej: os_disk dentro de VM)
+                  for sub in (r.get("subresources") or []):
+                      src = float(sub.get("monthlyCost") or 0)
+                      if src > 0:
+                          sname = sub.get("name", "")
+                          for comp in (sub.get("costComponents") or []):
+                              cc = float(comp.get("monthlyCost") or 0)
+                              if cc > 0:
+                                  paid_lines.append(f"| `{name}` | {sname} — {comp.get('name','')} | ${cc:.2f} |")
+
+          if found_paid:
+              lines.extend(paid_lines)
           lines.append("")
 
           if summary_path:
@@ -276,9 +290,7 @@ jobs:
           PY
 
       # ─────────────────────────────────────────
-      # GATE 4 — GOVERNANCE
-      # analyze_plan.py evalua region, tags, vm size
-      # El summary del semaforo sale aqui
+      # GATE 4 — GOVERNANCE (analyze_plan.py)
       # Siempre corre aunque Gate 3 falle
       # ─────────────────────────────────────────
       - name: "[Gate 4] IaC Governance — analyze plan"
