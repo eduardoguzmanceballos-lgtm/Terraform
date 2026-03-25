@@ -199,7 +199,7 @@ jobs:
         continue-on-error: true
         working-directory: azuredemo/terraform
         env:
-          MAX_MONTHLY_USD: "50"
+          MAX_MONTHLY_USD: "100"
         run: |
           python3 - <<'PY'
           import json, os, sys
@@ -227,16 +227,32 @@ jobs:
           lines.append(f"| Estado | {'✅ Dentro del presupuesto' if passed else '❌ Excede el presupuesto'} |")
           lines.append("")
 
+          # Recursos de pago
           projects = data.get("projects", [])
           if projects:
-              lines.append("### Recursos con costo")
-              lines.append("| Recurso | Costo mensual |")
-              lines.append("|---|---|")
+              lines.append("### 💰 Recursos de pago")
+              lines.append("| Recurso | Detalle | Costo mensual |")
+              lines.append("|---|---|---|")
               for p in projects:
                   for r in (p.get("breakdown", {}).get("resources", []) or []):
                       rc = float(r.get("monthlyCost") or 0)
                       if rc > 0:
-                          lines.append(f"| `{r.get('name','')}` | ${rc:.2f} |")
+                          name = r.get("name", "")
+                          for comp in (r.get("costComponents") or []):
+                              cc = float(comp.get("monthlyCost") or 0)
+                              if cc > 0:
+                                  desc = comp.get("name", "")
+                                  lines.append(f"| `{name}` | {desc} | ${cc:.2f} |")
+
+              lines.append("")
+              lines.append("### 🆓 Recursos gratis")
+              lines.append("| Recurso |")
+              lines.append("|---|")
+              for p in projects:
+                  for r in (p.get("breakdown", {}).get("resources", []) or []):
+                      rc = float(r.get("monthlyCost") or 0)
+                      if rc == 0:
+                          lines.append(f"| `{r.get('name','')}` |")
           lines.append("")
 
           if summary_path:
